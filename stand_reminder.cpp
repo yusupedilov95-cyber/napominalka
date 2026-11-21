@@ -1004,30 +1004,27 @@ static bool updBusy = false, updManual = false;
 static int VerNum(const wstring &v) {          // «2.10» -> 2010
     int a = 0, b = 0; swscanf(v.c_str() + (v.size() && (v[0] == L'v' || v[0] == L'V') ? 1 : 0), L"%d.%d", &a, &b); return a * 1000 + b;
 }
-static std::string JsonStr(const std::string &d, const char *key, size_t from = 0, size_t *at = nullptr) {
-    std::string k = std::string("\"") + key + "\""; size_t p = d.find(k, from); if (p == std::string::npos) return "";
-    size_t c = d.find(':', p + k.size()); if (c == std::string::npos) return "";
-    size_t q1 = d.find('"', c + 1); if (q1 == std::string::npos) return "";
-    size_t q2 = d.find('"', q1 + 1); if (q2 == std::string::npos) return "";
-    if (at) *at = q2;
-    return d.substr(q1 + 1, q2 - q1 - 1);
-}
 static wstring TempFile(const wchar_t *name) { wchar_t t[MAX_PATH]; GetTempPathW(MAX_PATH, t); return wstring(t) + name; }
+// latest.txt в репозитории: 1-я строка — версия, 2-я — ссылка на exe (если нет — стандартная)
+#define UPDATE_RAW L"https://raw.githubusercontent.com/" UPDATE_REPO L"/main/"
 static DWORD WINAPI UpdCheckThread(LPVOID) {    // в фоне: какая версия последняя
-    wstring url = L"https://api.github.com/repos/" UPDATE_REPO L"/releases/latest?nocache=" + std::to_wstring((long long)time(NULL));
-    wstring tmp = TempFile(L"napominalka_latest.json"); DeleteFileW(tmp.c_str());
+    wstring url = UPDATE_RAW L"latest.txt?nocache=" + std::to_wstring((long long)time(NULL));
+    wstring tmp = TempFile(L"napominalka_latest.txt"); DeleteFileW(tmp.c_str());
     DeleteUrlCacheEntryW(url.c_str());
     wstring *res = nullptr;
     if (URLDownloadToFileW(NULL, url.c_str(), tmp.c_str(), BINDF_GETNEWESTVERSION, NULL) == S_OK) {
         HANDLE f = CreateFileW(tmp.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (f != INVALID_HANDLE_VALUE) {
-            std::string d(1 << 20, 0); DWORD n = 0; ReadFile(f, &d[0], (DWORD)d.size(), &n, NULL); CloseHandle(f); d.resize(n);
-            std::string tag = JsonStr(d, "tag_name"), dl; size_t pos = 0, at = 0;
-            for (;;) {                                  // ищем файл Napominalka.exe среди вложений
-                std::string u = JsonStr(d, "browser_download_url", pos, &at); if (u.empty()) break; pos = at + 1;
-                if (u.size() > 15 && u.compare(u.size() - 15, 15, "Napominalka.exe") == 0) { dl = u; break; }
+            std::string d(4096, 0); DWORD n = 0; ReadFile(f, &d[0], (DWORD)d.size(), &n, NULL); CloseHandle(f); d.resize(n);
+            std::vector<std::string> lines; size_t p = 0;
+            while (p < d.size()) { size_t e = d.find('\n', p); if (e == std::string::npos) e = d.size();
+                std::string l = d.substr(p, e - p); while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back(); lines.push_back(l); p = e + 1; }
+            if (!lines.empty() && !lines[0].empty() && isdigit((unsigned char)lines[0][0])) {
+                wstring ver(lines[0].begin(), lines[0].end());
+                wstring dl = lines.size() > 1 && !lines[1].compare(0, 8, "https://") ? wstring(lines[1].begin(), lines[1].end())
+                                                                                    : wstring(UPDATE_RAW L"release/Napominalka.exe");
+                res = new wstring(ver + L"\n" + dl);
             }
-            if (!tag.empty() && !dl.empty()) res = new wstring(wstring(tag.begin(), tag.end()) + L"\n" + wstring(dl.begin(), dl.end()));
         }
         DeleteFileW(tmp.c_str());
     }

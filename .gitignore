@@ -8,3 +8,5 @@ start.bat
 *.png
 !icon/**/*.png
 Голоса_пример.wav
+
+!release/Napominalka.exe

@@ -3,5 +3,7 @@
 Небольшая программа для Windows: раз в час напоминает встать на 5 минут, плюс таймер, свои напоминания,
 отказы от вредного, время в играх, ночной режим экрана и чёрный экран для OLED.
 
-**Скачать:** раздел [Releases](../../releases/latest) → файл `Napominalka.exe`.
+**Скачать:** [release/Napominalka.exe](https://raw.githubusercontent.com/yusupedilov95-cyber/napominalka/main/release/Napominalka.exe)
+
 Дальше программа обновляется сама: меню значка возле часов → «Проверить обновления».
+Номер последней версии лежит в `latest.txt`.
