@@ -2,8 +2,8 @@
 1 ICON "icon/app.ico"
 3 ICON "icon/black/black2.ico"
 1 VERSIONINFO
-FILEVERSION 2,8,0,0
-PRODUCTVERSION 2,8,0,0
+FILEVERSION 2,9,0,0
+PRODUCTVERSION 2,9,0,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -11,8 +11,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "Напоминалка — встань на 5 минут"
       VALUE "ProductName", "Напоминалка"
-      VALUE "FileVersion", "2.8"
-      VALUE "ProductVersion", "2.8"
+      VALUE "FileVersion", "2.9"
+      VALUE "ProductVersion", "2.9"
       VALUE "LegalCopyright", "Создана 13 ноября 2026 г."
       VALUE "Comments", "Создана 13 ноября 2026 г."
     END

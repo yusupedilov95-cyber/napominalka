@@ -41,6 +41,7 @@ enum { HIT_NONE = -1, HIT_B0 = 0, HIT_B1 = 1, HIT_B2 = 2, HIT_CLOSE = 9 };
 #define WM_SHOWBLACK (WM_APP + 3)
 #define WM_UPDCHECKED (WM_APP + 4)
 #define WM_UPDDOWNLOADED (WM_APP + 5)
+#define WM_ALREADY (WM_APP + 6)
 enum { M_NOW = 200, M_AUTO, M_VOICE, M_EXIT, M_TEST, M_STATS, M_ST_MINUS, M_ST_PLUS, M_ST_ZERO, M_ST_RESET, M_ALREADY, M_DOTA_ON, M_DOTA_OFF, M_AWAY, M_EXPORT, M_IMPORT, M_TIMER_LAST, M_TIMER_STOP, M_POS0 = 300, M_VOICE0 = 400, M_VOL0 = 500, M_STEPS0 = 600, M_TIMER0 = 700,
        M_Q_SHOW = 800, M_Q_CUSTOM, M_Q_PRESET0 = 810, M_Q_RELAPSE0 = 900, M_Q_PLUS0 = 930, M_Q_MINUS0 = 960, M_Q_DEL0 = 990, M_GAMES = 1100, M_GAMES_RESET, M_G_ADD, M_G_REN0 = 1200, M_G_DEL0 = 1250,
        M_N_SCHED = 1300, M_N_ON, M_N_OFF, M_N_AUTO, M_N_PREVIEW, M_N_UNLOCK, M_N_START0 = 1320, M_N_END0 = 1340, M_N_K0 = 1360,
@@ -87,7 +88,7 @@ static Popup *cur = nullptr;
 static time_t dueAt; static int dueAction = ACT_NONE;
 static time_t timerEnd = 0; static int timerMin = 4, timerFiredMin = 4; static bool timerPending = false;   // таймер
 static int pendingKind = -1;            // напоминание ждёт, пока закроют полноэкранное приложение
-#define APP_VERSION L"2.8"
+#define APP_VERSION L"2.9"
 #define UPDATE_REPO L"yusupedilov95-cyber/napominalka"
 #define APP_CREATED L"13 ноября 2026 г."
 static float sc = 1.0f;
@@ -1000,7 +1001,7 @@ static time_t RoundUp5(time_t t) { struct tm m = *localtime(&t); m.tm_sec = 0; m
 // ---------- обновление одной кнопкой (новые версии лежат в GitHub Releases) ----------
 static HANDLE mtx = NULL;
 static wstring updVersion, updUrl;             // найденная новая версия
-static bool updBusy = false, updManual = false;
+static bool updBusy = false, updManual = false, updPopupPending = false;
 static int VerNum(const wstring &v) {          // «2.10» -> 2010
     int a = 0, b = 0; swscanf(v.c_str() + (v.size() && (v[0] == L'v' || v[0] == L'V') ? 1 : 0), L"%d.%d", &a, &b); return a * 1000 + b;
 }
@@ -1436,6 +1437,8 @@ static void BlackAutoCheck() {
     if (lastTry && GetTickCount() - lastTry < 5000) return;
     lastTry = GetTickCount();
     if (IsFullscreenApp() || DisplayRequired()) return;     // фильм, игра, видео — не мешаем
+    if (!gamesNow.empty()) return;                           // запущена игра (даже в окне, с геймпадом) — не трогаем
+    if (GsiActive()) return;                                 // открыта Dota 2
     BlackCreate(false);
     if (!hBlack) return;
     GetCursorPos(&blackAutoPt); blackAuto = true;
@@ -1829,6 +1832,13 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (msgTaskbarCreated && m == msgTaskbarCreated) { AddTray(); return 0; }
     switch (m) {
     case WM_SHOWBLACK: BlackCreate(true); return 0;
+    case WM_ALREADY:                                 // кто-то запустил программу ещё раз
+        if (!ShouldDefer()) {                        // в игре — молчим
+            nid.uFlags = NIF_INFO; wcscpy(nid.szInfoTitle, L"Напоминалка уже работает");
+            wcscpy(nid.szInfo, L"Её значок — возле часов. Вторая копия не нужна.");
+            nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        return 0;
     case WM_UPDCHECKED: {
         updBusy = false; wstring *r = (wstring *)lp;
         if (!r) { if (updManual) MessageBoxW(h, L"Не удалось проверить обновления (нет интернета?). Попробуйте позже.", L"Напоминалка", MB_ICONWARNING | MB_TOPMOST); return 0; }
@@ -1843,7 +1853,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (updManual) {
             wstring q = L"Доступна версия " + updVersion + L" (у вас " APP_VERSION L").\n\nОбновить сейчас? Программа перезапустится, статистика и настройки сохранятся.";
             if (MessageBoxW(h, q.c_str(), L"Напоминалка", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) UpdStartDownload();
-        } else if (!cur || cur->kind == P_STATS || cur->kind == P_POSDEMO) ShowPopup(P_UPDATE);
+        } else updPopupPending = true;               // покажем, когда не будет игры и других окон
         return 0; }
     case WM_UPDDOWNLOADED:
         updBusy = false;
@@ -1869,6 +1879,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             UpdateTip();
         }
         RemCheck();
+        if (updPopupPending && !ShouldDefer() && !away && (!cur || cur->kind == P_STATS || cur->kind == P_POSDEMO)) { updPopupPending = false; ShowPopup(P_UPDATE); }
         BlackAutoCheck();
         if (!remQueue.empty() && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
             wstring id = remQueue.front(); remQueue.erase(remQueue.begin());
@@ -2232,7 +2243,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
             if (m) { AllowSetForegroundWindow(ASFW_ANY); PostMessageW(m, WM_SHOWBLACK, 0, 0); }
             return 0;
         }
-        MessageBoxW(NULL, L"Напоминалка уже запущена (значок возле часов).", L"Напоминалка", MB_ICONINFORMATION);
+        // Никаких окон: сообщение забирало фокус и сворачивало игру. Просто сообщаем работающей копии и выходим.
+        Log(wstring(L"Попытка запустить вторую копию — закрыта молча. Параметры: «") + (cmd ? cmd : L"") + L"»");
+        HWND m = FindWindowW(L"StandMain", NULL);
+        if (m) PostMessageW(m, WM_ALREADY, 0, 0);
         return 0;
     }
 #ifdef TEST_MODE
