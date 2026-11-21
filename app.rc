@@ -1,0 +1,45 @@
+#pragma code_page(65001)
+1 ICON "icon/app.ico"
+3 ICON "icon/black/black2.ico"
+1 VERSIONINFO
+FILEVERSION 2,8,0,0
+PRODUCTVERSION 2,8,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041904B0"
+    BEGIN
+      VALUE "FileDescription", "Напоминалка — встань на 5 минут"
+      VALUE "ProductName", "Напоминалка"
+      VALUE "FileVersion", "2.8"
+      VALUE "ProductVersion", "2.8"
+      VALUE "LegalCopyright", "Создана 13 ноября 2026 г."
+      VALUE "Comments", "Создана 13 ноября 2026 г."
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x419, 1200
+  END
+END
+100 RCDATA "voice/0_remind.wav"
+101 RCDATA "voice/0_done.wav"
+102 RCDATA "voice/1_remind.wav"
+103 RCDATA "voice/1_done.wav"
+104 RCDATA "voice/2_remind.wav"
+105 RCDATA "voice/2_done.wav"
+106 RCDATA "voice/3_remind.wav"
+107 RCDATA "voice/3_done.wav"
+108 RCDATA "voice/4_remind.wav"
+109 RCDATA "voice/4_done.wav"
+110 RCDATA "voice/5_remind.wav"
+111 RCDATA "voice/5_done.wav"
+112 RCDATA "voice/6_remind.wav"
+113 RCDATA "voice/6_done.wav"
+200 RCDATA "voice/0_timer.wav"
+201 RCDATA "voice/1_timer.wav"
+202 RCDATA "voice/2_timer.wav"
+203 RCDATA "voice/3_timer.wav"
+204 RCDATA "voice/4_timer.wav"
+205 RCDATA "voice/5_timer.wav"
+206 RCDATA "voice/6_timer.wav"

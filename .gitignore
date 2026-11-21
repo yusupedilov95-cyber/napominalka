@@ -1,0 +1,10 @@
+*.exe
+*.zip
+*.o
+stand_reminder.v*.cpp
+stand_reminder.c
+stand_reminder.pyw
+start.bat
+*.png
+!icon/**/*.png
+Голоса_пример.wav
