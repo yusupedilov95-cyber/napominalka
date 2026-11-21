@@ -10,3 +10,4 @@ start.bat
 Голоса_пример.wav
 
 !release/Napominalka.exe
+!release/*.exe
