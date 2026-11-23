@@ -1,2 +1,2 @@
-3.0
-https://raw.githubusercontent.com/yusupedilov95-cyber/napominalka/main/release/Napominalka-3.0.exe
+3.1
+https://raw.githubusercontent.com/yusupedilov95-cyber/napominalka/main/release/Napominalka-3.1.exe

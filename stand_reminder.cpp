@@ -89,7 +89,7 @@ static Popup *cur = nullptr;
 static time_t dueAt; static int dueAction = ACT_NONE;
 static time_t timerEnd = 0; static int timerMin = 4, timerFiredMin = 4; static bool timerPending = false;   // таймер
 static int pendingKind = -1;            // напоминание ждёт, пока закроют полноэкранное приложение
-#define APP_VERSION L"3.0"
+#define APP_VERSION L"3.1"
 #define UPDATE_REPO L"yusupedilov95-cyber/napominalka"
 #define APP_CREATED L"13 ноября 2026 г."
 static float sc = 1.0f;
@@ -2167,7 +2167,7 @@ static HMENU FindSub(HMENU m, const wchar_t *label) {
     return NULL;
 }
 static float MeasureW(const wstring &s, const wchar_t *fam, float px) {
-    Bitmap bm(1, 1); Graphics g(&bm); g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    Bitmap bm(1, 1); Graphics g(&bm); g.SetTextRenderingHint(TextRenderingHintAntiAlias);
     FontFamily ff0(fam); const FontFamily *ff = ff0.IsAvailable() ? &ff0 : FontFamily::GenericSansSerif();
     Font f(ff, px, FontStyleRegular, UnitPixel); RectF out;
     StringFormat sf(StringFormat::GenericTypographic()); sf.SetFormatFlags(sf.GetFormatFlags() | StringFormatFlagsMeasureTrailingSpaces);
@@ -2500,7 +2500,8 @@ static void HubPaint(HWND h, HDC dc) {
     Bitmap bmp(W, H, PixelFormat32bppARGB);
     Graphics g(&bmp);
     g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetPixelOffsetMode(PixelOffsetModeHalf);
-    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    g.SetTextRenderingHint(TextRenderingHintAntiAlias);   // плавные буквы, без привязки к пиксельной сетке
+    g.SetTextContrast(2);
     SolidBrush bg(H_BG); g.FillRectangle(&bg, 0, 0, W, H);
     hubHits.clear();
     // боковая панель
