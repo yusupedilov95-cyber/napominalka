@@ -23,6 +23,7 @@
 #include <powrprof.h>
 #include <urlmon.h>
 #include <wininet.h>
+#include <dwmapi.h>
 #include <cstring>
 using namespace Gdiplus;
 using std::wstring;
@@ -46,7 +47,7 @@ enum { M_NOW = 200, M_AUTO, M_VOICE, M_EXIT, M_TEST, M_STATS, M_ST_MINUS, M_ST_P
        M_Q_SHOW = 800, M_Q_CUSTOM, M_Q_PRESET0 = 810, M_Q_RELAPSE0 = 900, M_Q_PLUS0 = 930, M_Q_MINUS0 = 960, M_Q_DEL0 = 990, M_GAMES = 1100, M_GAMES_RESET, M_G_ADD, M_G_REN0 = 1200, M_G_DEL0 = 1250,
        M_N_SCHED = 1300, M_N_ON, M_N_OFF, M_N_AUTO, M_N_PREVIEW, M_N_UNLOCK, M_N_START0 = 1320, M_N_END0 = 1340, M_N_K0 = 1360,
        M_R_1H = 1400, M_R_1D, M_R_1M, M_R_PICK, M_R_DEL0 = 1420,
-       M_B_SHOW = 1500, M_B_START, M_B_IDLE0 = 1510, M_LOG = 1600, M_UPD_CHECK, M_UPD_NOW };
+       M_B_SHOW = 1500, M_B_START, M_B_IDLE0 = 1510, M_LOG = 1600, M_UPD_CHECK, M_UPD_NOW, M_HUB };
 static const int B_IDLE[] = { 0, 1, 2, 3, 5, 10, 15 };
 static const int N_STARTS[] = { 20 * 60, 21 * 60, 21 * 60 + 30, 22 * 60, 22 * 60 + 30, 23 * 60, 23 * 60 + 30, 0 };
 static const int N_ENDS[] = { 5 * 60, 6 * 60, 6 * 60 + 30, 7 * 60, 7 * 60 + 30, 8 * 60, 9 * 60 };
@@ -88,7 +89,7 @@ static Popup *cur = nullptr;
 static time_t dueAt; static int dueAction = ACT_NONE;
 static time_t timerEnd = 0; static int timerMin = 4, timerFiredMin = 4; static bool timerPending = false;   // таймер
 static int pendingKind = -1;            // напоминание ждёт, пока закроют полноэкранное приложение
-#define APP_VERSION L"2.9"
+#define APP_VERSION L"3.0"
 #define UPDATE_REPO L"yusupedilov95-cyber/napominalka"
 #define APP_CREATED L"13 ноября 2026 г."
 static float sc = 1.0f;
@@ -1828,95 +1829,10 @@ static void DisconnectDota(HWND h) {
     MessageBoxW(h, L"Dota 2 отключена: файл настройки удалён.\nПараметр запуска -gamestateintegration можно убрать в Steam вручную.", L"Напоминалка", MB_ICONINFORMATION | MB_TOPMOST);
 }
 
-static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    if (msgTaskbarCreated && m == msgTaskbarCreated) { AddTray(); return 0; }
-    switch (m) {
-    case WM_SHOWBLACK: BlackCreate(true); return 0;
-    case WM_ALREADY:                                 // кто-то запустил программу ещё раз
-        if (!ShouldDefer()) {                        // в игре — молчим
-            nid.uFlags = NIF_INFO; wcscpy(nid.szInfoTitle, L"Напоминалка уже работает");
-            wcscpy(nid.szInfo, L"Её значок — возле часов. Вторая копия не нужна.");
-            nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &nid);
-        }
-        return 0;
-    case WM_UPDCHECKED: {
-        updBusy = false; wstring *r = (wstring *)lp;
-        if (!r) { if (updManual) MessageBoxW(h, L"Не удалось проверить обновления (нет интернета?). Попробуйте позже.", L"Напоминалка", MB_ICONWARNING | MB_TOPMOST); return 0; }
-        size_t nl = r->find(L'\n'); wstring tag = r->substr(0, nl), url = r->substr(nl + 1); delete r;
-        if (VerNum(tag) <= VerNum(APP_VERSION)) {
-            updVersion.clear(); updUrl.clear();
-            if (updManual) MessageBoxW(h, L"У вас последняя версия: " APP_VERSION L".", L"Напоминалка", MB_ICONINFORMATION | MB_TOPMOST);
-            return 0;
-        }
-        updVersion = tag[0] == L'v' ? tag.substr(1) : tag; updUrl = url;
-        Log(L"Найдена новая версия " + updVersion);
-        if (updManual) {
-            wstring q = L"Доступна версия " + updVersion + L" (у вас " APP_VERSION L").\n\nОбновить сейчас? Программа перезапустится, статистика и настройки сохранятся.";
-            if (MessageBoxW(h, q.c_str(), L"Напоминалка", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) UpdStartDownload();
-        } else updPopupPending = true;               // покажем, когда не будет игры и других окон
-        return 0; }
-    case WM_UPDDOWNLOADED:
-        updBusy = false;
-        if (wp) UpdInstall();
-        else { Log(L"Обновление не скачалось"); MessageBoxW(h, L"Не получилось скачать обновление. Попробуйте позже.", L"Напоминалка", MB_ICONWARNING | MB_TOPMOST); }
-        return 0;
-    case WM_GSI:
-        if (WSAGETSELECTEVENT(lp) == FD_ACCEPT) GsiAccept(h);
-        return 0;
-    case WM_TIMER:
-        if (wp == T_GAMES) { GamePoll(); return 0; }
-        if (wp == T_UPDCHECK) { SetTimer(h, T_UPDCHECK, 6 * 3600 * 1000, NULL); if (!testMode) UpdCheck(false); return 0; }
-        if (wp == T_DELOLD) { KillTimer(h, T_DELOLD); DeleteFileW((ExePath() + L".old").c_str()); return 0; }
-        if (wp == T_NIGHT) { NightUpdate(nightAppliedK < 6500); return 0; }
-        if (wp == T_NIGHT_PREVIEW) { KillTimer(h, T_NIGHT_PREVIEW); previewUntil = 0; NightUpdate(true); return 0; }
-        CheckAway();
-        if (timerEnd) {
-            if (time(NULL) >= timerEnd) {            // звук сразу, окно — как только можно показать
-                Log(L"Сработал таймер");
-                timerEnd = 0; timerFiredMin = timerMin; timerPending = true;
-                if (VoiceOn()) Speak(2); else Chime();
-            }
-            UpdateTip();
-        }
-        RemCheck();
-        if (updPopupPending && !ShouldDefer() && !away && (!cur || cur->kind == P_STATS || cur->kind == P_POSDEMO)) { updPopupPending = false; ShowPopup(P_UPDATE); }
-        BlackAutoCheck();
-        if (!remQueue.empty() && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
-            wstring id = remQueue.front(); remQueue.erase(remQueue.begin());
-            Reminder r;
-            if (RemGet(id, r)) {
-                if (cur && (cur->kind == P_REMIND || cur->kind == P_DONE)) pendingKind = cur->kind;
-                showCustomId = id; ShowPopup(P_CUSTOM);
-            }
-        }
-        if (timerPending && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_CUSTOM || cur->dragging))) {
-            timerPending = false;
-            if (cur && (cur->kind == P_REMIND || cur->kind == P_DONE)) pendingKind = cur->kind;   // вернём напоминание после таймера
-            ShowPopup(P_TIMER);
-        }
-        if (dueAction != ACT_NONE && time(NULL) >= dueAt) {
-            int a = dueAction; dueAction = ACT_NONE;
-            if (a == ACT_REMIND) { if (!away) pendingKind = P_REMIND; Log(away ? L"Время напоминания, но вас нет за компьютером — пауза" : L"Время напоминания «Пора встать»"); }
-            else { sittingSince = time(NULL); pendingKind = P_DONE; Schedule(WORK_MIN, ACT_REMIND); }
-            UpdateTip();
-        }
-        // показываем, только когда нет полноэкранного приложения и в Доте не идёт матч
-        static bool deferLogged = false;
-        if (pendingKind < 0) deferLogged = false;
-        else if (!deferLogged && ShouldDefer()) {
-            deferLogged = true;
-            Log(GsiActive() && gsiInMatch ? wstring(L"Отложено: идёт матч Dota 2") : L"Отложено: открыто на весь экран — " + ForegroundExe());
-        }
-        if (pendingKind >= 0 && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
-            int k = pendingKind; pendingKind = -1;
-            ShowPopup((Kind)k); UpdateTip();
-            Log(k == P_REMIND ? L"Показано окно «Пора встать»" : L"Показано окно «Можно садиться»");
-        }
-        return 0;
-    case WM_TRAY:
-        if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU || lp == WM_LBUTTONUP) {
-            POINT pt; GetCursorPos(&pt);
-            HMENU mn = CreatePopupMenu();
+static void HubShow(); static void HubRefresh();
+// ---------- полное меню (оно же — источник подменю для главного окна) ----------
+static HMENU BuildFullMenu() {
+    HMENU mn = CreatePopupMenu();
             wstring next = pendingKind >= 0 ? L"Напомню после матча / игры" : dueAction == ACT_NONE ? L"Напоминалка" : L"Следующее в " + Clock(dueAt);
             AppendMenuW(mn, MF_STRING | MF_GRAYED, 0, next.c_str());
             wstring todayS = L"Сегодня вставал: " + Times(StatGet(DayKey(time(NULL))));
@@ -2085,9 +2001,9 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             AppendMenuW(mn, MF_STRING, M_LOG, L"Журнал событий…");
             AppendMenuW(mn, MF_STRING | MF_GRAYED, 0, L"Версия " APP_VERSION L"  ·  создана " APP_CREATED);
             AppendMenuW(mn, MF_STRING, M_EXIT, L"Выход");
-            SetForegroundWindow(h);
-            int c = TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, NULL);
-            DestroyMenu(mn);
+    return mn;
+}
+static void HandleCmd(HWND h, int c) {
             if (c == M_NOW) { dueAction = ACT_NONE; pendingKind = -1; ShowPopup(P_REMIND); UpdateTip(); }
             else if (c == M_AUTO) SetAutoStart(!AutoStartOn());
             else if (c == M_VOICE) SetVoice(!VoiceOn());
@@ -2106,7 +2022,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 else if (c >= M_Q_PRESET0 && c < M_Q_PRESET0 + Q_PRESET_N) QuitAdd(Q_PRESETS[c - M_Q_PRESET0]);
                 else {
                     int idx = (c - M_Q_RELAPSE0) % 30, op = (c - M_Q_RELAPSE0) / 30;
-                    if (c < M_Q_RELAPSE0 || idx >= (int)menuQuits.size()) return 0;
+                    if (c < M_Q_RELAPSE0 || idx >= (int)menuQuits.size()) return;
                     const QuitItem &q = menuQuits[idx];
                     if (op == 0) {
                         wstring t = L"Начать отсчёт «" + q.name + L"» заново?\n\nСейчас: " + Span(time(NULL) - q.start) + L". Этот результат сохранится как рекорд.";
@@ -2133,7 +2049,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 else if (c == M_R_1M) AskReminder(h, AddMonths(now, 1), false);
                 else if (c == M_R_PICK) AskReminder(h, 0, true);
                 else {
-                    size_t i = c - M_R_DEL0; if (i >= menuRems.size()) return 0;
+                    size_t i = c - M_R_DEL0; if (i >= menuRems.size()) return;
                     wstring t = L"Удалить напоминание?\n\n" + WhenStr(menuRems[i].at) + L"  —  " + menuRems[i].text;
                     if (MessageBoxW(h, t.c_str(), L"Напоминалка", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST) == IDYES) RemDelete(menuRems[i].id);
                 }
@@ -2155,7 +2071,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                             L"add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM\" /v GdiICMGammaRange /t REG_DWORD /d 256 /f", NULL, SW_HIDE);
                         if ((INT_PTR)r > 32) MessageBoxW(h, L"Готово. Перезагрузите компьютер, и полная сила ночного режима заработает.", L"Напоминалка", MB_ICONINFORMATION | MB_TOPMOST);
                     }
-                    return 0;
+                    return;
                 }
                 NightUpdate(true);
             }
@@ -2173,7 +2089,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             else if (c >= M_G_REN0 && c < M_G_DEL0 + 40) {
                 bool del = c >= M_G_DEL0; size_t i = c - (del ? M_G_DEL0 : M_G_REN0);
-                if (i >= menuGames.size()) return 0;
+                if (i >= menuGames.size()) return;
                 wstring g = menuGames[i];
                 if (del) {
                     wstring t = L"«" + g + L"» — не игра?\n\nПрограмма перестанет её считать и удалит уже набранное время (" + HM(RegQ(GT_KEY, g)) + L").";
@@ -2215,6 +2131,607 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             else if (c == M_UPD_NOW) UpdStartDownload();
             else if (c == M_LOG) { Log(L"Открыт журнал"); ShellExecuteW(h, L"open", LogPath().c_str(), NULL, NULL, SW_SHOWNORMAL); }
             else if (c == M_EXIT) { Log(L"Программа закрыта через «Выход»"); DestroyWindow(h); }
+}
+
+// ======================= главное окно (красивое меню) =======================
+// Тёмное окно с разделами слева. Все действия — те же команды, что и в меню значка (HandleCmd).
+enum { A_NAV = 1, A_CMD, A_MENU, A_ROW };
+struct Hit { RectF r; int act, arg; };
+static HWND hHub = NULL;
+static int hubTab = 0, hubHoverAct = 0, hubHoverArg = 0, hubPressAct = 0, hubPressArg = 0;
+static float hubScroll[6] = {}, hubContentH = 0, hubViewH = 0;
+static std::vector<Hit> hubHits;
+static const Color H_BG(255, 0x12, 0x15, 0x1C), H_SIDE(255, 0x0D, 0x10, 0x16), H_CARD(255, 0x1A, 0x1F, 0x2A),
+                   H_TEXT(255, 0xF3, 0xF5, 0xF9), H_SUB(255, 0x9A, 0xA3, 0xB5), H_DIM(255, 0x6B, 0x72, 0x80),
+                   H_G1(255, 0x3D, 0xDC, 0x97), H_G2(255, 0x14, 0x9E, 0xA8);
+enum Glyph2 { G_CHART = 10, G_BELL, G_PAD, G_GEAR, G_NO, G_HOME };
+static const wchar_t *HUB_TABS[] = { L"Главная", L"Статистика", L"Отказы", L"Напоминания", L"Игры", L"Настройки" };
+static const int HUB_GLYPH[] = { G_HOME, G_CHART, G_NO, G_BELL, G_PAD, G_GEAR };
+// подменю из полного меню, по названиям пунктов
+static const wchar_t *HUB_MENU_PATH[][2] = {
+    { L"Ночной режим (тёплый экран)", L"Начало вечером" }, { L"Ночной режим (тёплый экран)", L"Конец утром" },
+    { L"Ночной режим (тёплый экран)", L"Насколько тёплый" }, { L"Чёрный экран (OLED)", L"Включать сам" },
+    { L"Голос", NULL }, { L"Громкость голоса", NULL }, { L"Где показывать окно", NULL }, { L"Сколько шагов в день я хожу", NULL },
+    { L"Dota 2: напоминать между матчами", NULL }, { L"Отказы от вредного", L"Добавить" }, { L"Таймер на другое время", NULL },
+    { L"Изменить статистику", NULL } };
+enum { HM_NSTART, HM_NEND, HM_NK, HM_BLACK, HM_VOICE, HM_VOL, HM_POS, HM_STEPS, HM_DOTA, HM_QADD, HM_TIMER, HM_STATS };
+
+static HMENU FindSub(HMENU m, const wchar_t *label) {
+    if (!m || !label) return m;
+    int n = GetMenuItemCount(m);
+    for (int i = 0; i < n; i++) {
+        HMENU sub = GetSubMenu(m, i); if (!sub) continue;
+        wchar_t t[128]; GetMenuStringW(m, i, t, 128, MF_BYPOSITION);
+        if (!wcscmp(t, label)) return sub;
+    }
+    return NULL;
+}
+static float MeasureW(const wstring &s, const wchar_t *fam, float px) {
+    Bitmap bm(1, 1); Graphics g(&bm); g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    FontFamily ff0(fam); const FontFamily *ff = ff0.IsAvailable() ? &ff0 : FontFamily::GenericSansSerif();
+    Font f(ff, px, FontStyleRegular, UnitPixel); RectF out;
+    StringFormat sf(StringFormat::GenericTypographic()); sf.SetFormatFlags(sf.GetFormatFlags() | StringFormatFlagsMeasureTrailingSpaces);
+    g.MeasureString(s.c_str(), -1, &f, PointF(0, 0), &sf, &out);
+    return out.Width;
+}
+static void HubIcon(Graphics &g, RectF r, int glyph, Color c) {      // маленькие значки разделов (линиями)
+    float k = r.Width / 24, ox = r.X, oy = r.Y;
+    Pen p(c, 1.9f * k); p.SetStartCap(LineCapRound); p.SetEndCap(LineCapRound); p.SetLineJoin(LineJoinRound);
+    SolidBrush b(c);
+    auto P = [&](float x, float y) { return PointF(ox + x * k, oy + y * k); };
+    switch (glyph) {
+    case G_HOME: { PointF pts[5] = { P(4, 11), P(12, 4), P(20, 11), P(20, 20), P(4, 20) }; g.DrawPolygon(&p, pts, 5); g.DrawLine(&p, P(10, 20), P(10, 14)); g.DrawLine(&p, P(10, 14), P(14, 14)); g.DrawLine(&p, P(14, 14), P(14, 20)); break; }
+    case G_CHART: g.DrawLine(&p, P(6, 19), P(6, 12)); g.DrawLine(&p, P(12, 19), P(12, 6)); g.DrawLine(&p, P(18, 19), P(18, 10)); break;
+    case G_NO: g.DrawEllipse(&p, ox + 4 * k, oy + 4 * k, 16 * k, 16 * k); g.DrawLine(&p, P(7, 7), P(17, 17)); break;
+    case G_BELL: {
+        GraphicsPath bp; bp.AddArc(ox + 6 * k, oy + 4 * k, 12 * k, 12 * k, 180, 180);
+        bp.AddLine(P(18, 10), P(19, 17)); bp.AddLine(P(19, 17), P(5, 17)); bp.AddLine(P(5, 17), P(6, 10));
+        g.DrawPath(&p, &bp); g.DrawLine(&p, P(10, 20), P(14, 20)); break; }
+    case G_PAD: {
+        GraphicsPath pp; RR(pp, RectF(ox + 3 * k, oy + 7 * k, 18 * k, 11 * k), 5 * k); g.DrawPath(&p, &pp);
+        g.DrawLine(&p, P(8, 10.5f), P(8, 14.5f)); g.DrawLine(&p, P(6, 12.5f), P(10, 12.5f));
+        g.FillEllipse(&b, ox + 14.6f * k, oy + 10 * k, 2.2f * k, 2.2f * k); g.FillEllipse(&b, ox + 16.8f * k, oy + 12.6f * k, 2.2f * k, 2.2f * k); break; }
+    case G_GEAR: {
+        g.DrawEllipse(&p, ox + 8.5f * k, oy + 8.5f * k, 7 * k, 7 * k);
+        for (int i = 0; i < 8; i++) { float a = i * 3.14159f / 4; g.DrawLine(&p, P(12 + cosf(a) * 6.5f, 12 + sinf(a) * 6.5f), P(12 + cosf(a) * 9, 12 + sinf(a) * 9)); }
+        break; }
+    }
+}
+// ---- элементы интерфейса; координаты y — внутри прокручиваемой области ----
+struct HubCtx { Graphics *g; RectF view; float scroll; };
+static RectF HR(const HubCtx &c, RectF r) { return RectF(r.X, r.Y - c.scroll, r.Width, r.Height); }   // с учётом прокрутки
+static void AddHit(const HubCtx &c, RectF r, int act, int arg) {
+    RectF v = HR(c, r); RectF in; if (!RectF::Intersect(in, v, c.view)) return;
+    hubHits.push_back({ in, act, arg });
+}
+static bool Hov(int act, int arg) { return hubHoverAct == act && hubHoverArg == arg; }
+static void HCard(const HubCtx &c, RectF r) {
+    RectF v = HR(c, r); GraphicsPath p; RR(p, v, S(14));
+    SolidBrush b(H_CARD); c.g->FillPath(&b, &p);
+    Pen pen(Color(16, 255, 255, 255), 1.0f); c.g->DrawPath(&pen, &p);
+}
+static float HButton(const HubCtx &c, float x, float y, const wstring &label, int act, int arg, bool primary = false, float h = 0, float w = 0,
+                     Color a1 = Color(0, 0, 0, 0), Color a2 = Color(0, 0, 0, 0)) {
+    if (!h) h = S(36);
+    if (!w) w = MeasureW(label, semiFont.c_str(), S(13)) + S(30);
+    RectF r(x, y, w, h), v = HR(c, r);
+    bool hv = Hov(act, arg); GraphicsPath p; RR(p, v, S(10));
+    if (primary) {
+        Color c1 = a1.GetA() ? a1 : H_G1, c2 = a2.GetA() ? a2 : H_G2;
+        if (hv) { c1 = Mix(c1, Color(255, 255, 255, 255), 0.12f); c2 = Mix(c2, Color(255, 255, 255, 255), 0.12f); }
+        LinearGradientBrush gb(PointF(v.X, v.Y), PointF(v.X + v.Width, v.Y + v.Height), c1, c2); c.g->FillPath(&gb, &p);
+    } else {
+        SolidBrush b(Color(hv ? 34 : 18, 255, 255, 255)); c.g->FillPath(&b, &p);
+        Pen pen(Color(hv ? 40 : 24, 255, 255, 255), 1.0f); c.g->DrawPath(&pen, &p);
+    }
+    Text(*c.g, label, semiFont.c_str(), S(13), FontStyleRegular, H_TEXT, v, StringAlignmentCenter, StringAlignmentCenter, true);
+    AddHit(c, r, act, arg);
+    return w;
+}
+struct Flow { float x0, x, y, maxX; };              // ряд кнопок с переносом на новую строку
+static void FBtn(const HubCtx &c, Flow &f, const wstring &label, int act, int arg, bool primary = false,
+                 Color a1 = Color(0, 0, 0, 0), Color a2 = Color(0, 0, 0, 0)) {
+    float w = MeasureW(label, semiFont.c_str(), S(13)) + S(30);
+    if (f.x > f.x0 && f.x + w > f.maxX) { f.x = f.x0; f.y += S(36) + S(10); }
+    HButton(c, f.x, f.y, label, act, arg, primary, 0, w, a1, a2);
+    f.x += w + S(10);
+}
+static void HDropdown(const HubCtx &c, RectF r, const wstring &value, int menuIdx) {
+    RectF v = HR(c, r); bool hv = Hov(A_MENU, menuIdx); GraphicsPath p; RR(p, v, S(10));
+    SolidBrush b(Color(hv ? 34 : 18, 255, 255, 255)); c.g->FillPath(&b, &p);
+    Pen pen(Color(hv ? 40 : 24, 255, 255, 255), 1.0f); c.g->DrawPath(&pen, &p);
+    Text(*c.g, value, L"Segoe UI", S(13), FontStyleRegular, H_TEXT, RectF(v.X + S(12), v.Y, v.Width - S(36), v.Height), StringAlignmentNear, StringAlignmentCenter, true);
+    Pen ch(H_SUB, S(1.6f)); ch.SetStartCap(LineCapRound); ch.SetEndCap(LineCapRound);
+    float cx = v.X + v.Width - S(18), cy = v.Y + v.Height / 2;
+    c.g->DrawLine(&ch, cx - S(4), cy - S(2), cx, cy + S(2)); c.g->DrawLine(&ch, cx, cy + S(2), cx + S(4), cy - S(2));
+    AddHit(c, r, A_MENU, menuIdx);
+}
+static void HToggle(const HubCtx &c, RectF r, bool on, int cmd) {     // переключатель
+    RectF v = HR(c, r); GraphicsPath p; RR(p, v, v.Height / 2 - 0.1f);
+    if (on) { LinearGradientBrush gb(PointF(v.X, 0), PointF(v.X + v.Width, 0), H_G1, H_G2); c.g->FillPath(&gb, &p); }
+    else { SolidBrush b(Color(Hov(A_CMD, cmd) ? 60 : 40, 255, 255, 255)); c.g->FillPath(&b, &p); }
+    float d = v.Height - S(6), x = on ? v.X + v.Width - d - S(3) : v.X + S(3);
+    SolidBrush kb(Color(255, 255, 255, 255)); c.g->FillEllipse(&kb, x, v.Y + S(3), d, d);
+    AddHit(c, r, A_CMD, cmd);
+}
+static void HStat(const HubCtx &c, RectF r, const wstring &title, const wstring &value, const wstring &sub, Color accent) {
+    HCard(c, r); RectF v = HR(c, r);
+    Text(*c.g, title, L"Segoe UI", S(12), FontStyleRegular, H_SUB, RectF(v.X + S(16), v.Y + S(14), v.Width - S(32), S(18)), StringAlignmentNear, StringAlignmentNear, true);
+    float px = S(26); while (px > S(15) && MeasureW(value, semiFont.c_str(), px) > v.Width - S(32)) px -= S(2);
+    Text(*c.g, value, semiFont.c_str(), px, FontStyleRegular, accent, RectF(v.X + S(16), v.Y + S(34) + (S(26) - px) / 2, v.Width - S(32), S(36)), StringAlignmentNear, StringAlignmentNear, true);
+    if (!sub.empty()) Text(*c.g, sub, L"Segoe UI", S(12), FontStyleRegular, H_DIM, RectF(v.X + S(16), v.Y + S(72), v.Width - S(32), S(18)), StringAlignmentNear, StringAlignmentNear, true);
+}
+static void HBars(const HubCtx &c, RectF r, const int *val, int n, bool minutes, Color c1, Color c2) {
+    static const wchar_t *WD[] = { L"Вс", L"Пн", L"Вт", L"Ср", L"Чт", L"Пт", L"Сб" };
+    RectF v = HR(c, r); time_t now = time(NULL); int mx = 1;
+    for (int i = 0; i < n; i++) mx = std::max(mx, val[i]);
+    float slot = v.Width / n, top = S(18), bot = S(20), maxH = v.Height - top - bot, bw = std::min(slot * 0.56f, S(34));
+    SolidBrush line(Color(22, 255, 255, 255)); c.g->FillRectangle(&line, RectF(v.X, v.Y + top + maxH, v.Width, 1));
+    for (int i = 0; i < n; i++) {
+        time_t d = now - (time_t)(n - 1 - i) * 86400; struct tm *tmv = localtime(&d); int wd = tmv->tm_wday, md = tmv->tm_mday;
+        bool today = i == n - 1;
+        float bh = val[i] ? std::max(S(5), maxH * val[i] / mx) : S(3);
+        RectF br(v.X + slot * i + (slot - bw) / 2, v.Y + top + maxH - bh, bw, bh);
+        GraphicsPath bp; RR(bp, br, std::min(S(5), std::min(bh, bw) / 2 - 0.1f));
+        if (!val[i]) { SolidBrush zb(Color(34, 255, 255, 255)); c.g->FillPath(&zb, &bp); }
+        else if (today) { LinearGradientBrush tb(PointF(0, br.Y - 1), PointF(0, br.Y + br.Height + 1), c1, c2); c.g->FillPath(&tb, &bp); }
+        else { SolidBrush ob(A(c1, 110)); c.g->FillPath(&ob, &bp); }
+        if (val[i]) {
+            wstring t = minutes ? (val[i] >= 60 ? std::to_wstring(val[i] / 60) + (val[i] % 60 >= 30 ? L",5" : L"") + L" ч" : std::to_wstring(val[i]) + L" м") : std::to_wstring(val[i]);
+            Text(*c.g, t, semiFont.c_str(), S(11), FontStyleRegular, today ? H_TEXT : Color(255, 0xC5, 0xCC, 0xDA),
+                 RectF(v.X + slot * i - S(6), br.Y - S(17), slot + S(12), S(15)), StringAlignmentCenter, StringAlignmentFar, true);
+        }
+        wstring lab = n <= 7 ? wstring(WD[wd]) : std::to_wstring(md);
+        Text(*c.g, lab, today ? semiFont.c_str() : L"Segoe UI", S(11), FontStyleRegular, today ? H_TEXT : H_DIM,
+             RectF(v.X + slot * i, v.Y + top + maxH + S(4), slot, S(15)), StringAlignmentCenter, StringAlignmentNear, true);
+    }
+}
+static void HTitle(const HubCtx &c, float x, float y, float w, const wstring &title, const wstring &sub) {
+    RectF v = HR(c, RectF(x, y, w, S(34)));
+    Text(*c.g, title, semiFont.c_str(), S(24), FontStyleRegular, H_TEXT, v, StringAlignmentNear, StringAlignmentNear, true);
+    if (!sub.empty()) Text(*c.g, sub, L"Segoe UI", S(13), FontStyleRegular, H_SUB, HR(c, RectF(x, y + S(36), w, S(20))), StringAlignmentNear, StringAlignmentNear, true);
+}
+static void HSection(const HubCtx &c, float x, float y, float w, const wstring &t) {
+    Text(*c.g, t, semiFont.c_str(), S(15), FontStyleRegular, H_TEXT, HR(c, RectF(x, y, w, S(22))), StringAlignmentNear, StringAlignmentNear, true);
+}
+static void HLabel(const HubCtx &c, RectF r, const wstring &t, float px, Color col, bool semi = false, StringAlignment ha = StringAlignmentNear) {
+    Text(*c.g, t, semi ? semiFont.c_str() : L"Segoe UI", px, FontStyleRegular, col, HR(c, r), ha, StringAlignmentCenter, true);
+}
+
+// ---- разделы ----
+static float HubHome(const HubCtx &c, float x, float y, float w) {
+    time_t now = time(NULL); struct tm *m = localtime(&now);
+    static const wchar_t *WDF[] = { L"воскресенье", L"понедельник", L"вторник", L"среда", L"четверг", L"пятница", L"суббота" };
+    static const wchar_t *MON[] = { L"января", L"февраля", L"марта", L"апреля", L"мая", L"июня", L"июля", L"августа", L"сентября", L"октября", L"ноября", L"декабря" };
+    const wchar_t *hello = m->tm_hour < 5 ? L"Доброй ночи" : m->tm_hour < 12 ? L"Доброе утро" : m->tm_hour < 18 ? L"Добрый день" : L"Добрый вечер";
+    HTitle(c, x, y, w, hello, wstring(WDF[m->tm_wday]) + L", " + std::to_wstring(m->tm_mday) + L" " + MON[m->tm_mon]);
+    y += S(76);
+    float gap = S(14), cw = (w - 2 * gap) / 3, ch = S(100);
+    int today = (int)StatGet(DayKey(now));
+    HStat(c, RectF(x, y, cw, ch), L"Сегодня вставал", Times(today), Min(today * STAND_MIN) + L" на ногах", H_G1);
+    wstring nv, ns;
+    if (AwayNow()) { nv = L"Пауза"; ns = L"вас нет за компьютером"; }
+    else if (pendingKind >= 0) { nv = L"После игры"; ns = L"покажу, когда свернёте игру"; }
+    else if (cur && cur->kind == P_REMIND) { nv = L"Сейчас"; ns = L"окно напоминания на экране"; }
+    else if (dueAction == ACT_REMIND) { long mins = (long)((dueAt - now + 59) / 60); nv = Clock(dueAt); ns = L"через " + Min((int)std::max(0L, mins)); }
+    else if (dueAction == ACT_DONE) { nv = L"Стоите"; ns = L"можно садиться в " + Clock(dueAt); }
+    else { nv = L"—"; ns = L""; }
+    HStat(c, RectF(x + cw + gap, y, cw, ch), L"Следующее напоминание", nv, ns, Color(255, 0x7D, 0xD3, 0xFC));
+    HStat(c, RectF(x + 2 * (cw + gap), y, cw, ch), L"Серия", Days(StatStreak()), L"дней подряд вставал", Color(255, 0xFB, 0xBF, 0x24));
+    y += ch + S(26);
+    HSection(c, x, y, w, L"Быстрые действия"); y += S(32);
+    Flow f = { x, x, y, x + w };
+    FBtn(c, f, L"Я уже постоял " + Min(STAND_MIN), A_CMD, M_ALREADY, true);
+    FBtn(c, f, L"Напомнить сейчас", A_CMD, M_NOW);
+    if (timerEnd) FBtn(c, f, L"Стоп таймер  " + TimerLeft(), A_CMD, M_TIMER_STOP, true, Color(255, 0xFB, 0xBF, 0x24), Color(255, 0xF9, 0x73, 0x16));
+    else FBtn(c, f, L"Таймер " + std::to_wstring((int)GetCfg(L"TimerMin", 4)) + L" мин", A_CMD, M_TIMER_LAST);
+    FBtn(c, f, L"Другое время…", A_MENU, HM_TIMER);
+    FBtn(c, f, L"Чёрный экран", A_CMD, M_B_SHOW);
+    y = f.y + S(36) + S(26);
+    HCard(c, RectF(x, y, w, S(200)));
+    HLabel(c, RectF(x + S(18), y + S(14), w, S(22)), L"Подходы за неделю", S(14), H_TEXT, true);
+    int v7[7]; for (int i = 0; i < 7; i++) v7[i] = (int)StatGet(DayKey(now - (time_t)(6 - i) * 86400));
+    HBars(c, RectF(x + S(18), y + S(44), w - S(36), S(140)), v7, 7, false, H_G1, H_G2);
+    return y + S(200);
+}
+static float HubStats(const HubCtx &c, float x, float y, float w) {
+    time_t now = time(NULL); int today = (int)StatGet(DayKey(now)), total = (int)StatGet(L"Total"), steps = (int)GetCfg(L"StepsPerDay", 6500);
+    HTitle(c, x, y, w, L"Статистика", L"Каждое «Да, встал» и каждый раз, когда вы отходили от компьютера");
+    y += S(76);
+    float gap = S(14), cw = (w - 3 * gap) / 4, ch = S(100);
+    HStat(c, RectF(x, y, cw, ch), L"Сегодня", Times(today), Min(today * STAND_MIN), H_G1);
+    HStat(c, RectF(x + (cw + gap), y, cw, ch), L"7 дней", Times(StatDays(7)), L"", H_TEXT);
+    HStat(c, RectF(x + 2 * (cw + gap), y, cw, ch), L"30 дней", Times(StatDays(30)), L"", H_TEXT);
+    HStat(c, RectF(x + 3 * (cw + gap), y, cw, ch), L"Всего", Times(total), L"лучший день: " + Times(StatBestDay()), H_TEXT);
+    y += ch + S(16);
+    HCard(c, RectF(x, y, w, S(210)));
+    HLabel(c, RectF(x + S(18), y + S(14), w, S(22)), L"Последние 14 дней", S(14), H_TEXT, true);
+    int v14[14]; for (int i = 0; i < 14; i++) v14[i] = (int)StatGet(DayKey(now - (time_t)(13 - i) * 86400));
+    HBars(c, RectF(x + S(18), y + S(44), w - S(36), S(150)), v14, 14, false, H_G1, H_G2);
+    y += S(226);
+    HCard(c, RectF(x, y, w, S(150)));
+    HLabel(c, RectF(x + S(18), y + S(14), w, S(22)), L"Польза за всё время", S(14), H_TEXT, true);
+    wstring l1 = L"На ногах:  " + Dur(total * STAND_MIN) + L"   ·   ≈ " + Num((int)(total * STAND_MIN * 1.5 + 0.5)) + L" ккал сверх сидения";
+    wstring l2 = L"Глаза отдыхали:  " + Times(total) + L"  (≈ " + Dur0(total * 20 / 60) + L" взгляда вдаль)";
+    wstring l3 = L"Шаги:  " + Num(steps) + L" в день  ≈  " + Km(steps) + L" км и ≈ " + std::to_wstring((int)(steps * 0.04 + 0.5)) + L" ккал";
+    wstring l4 = L"Серия:  " + Days(StatStreak()) + L" подряд";
+    HLabel(c, RectF(x + S(18), y + S(44), w - S(36), S(22)), l1, S(13), H_SUB);
+    HLabel(c, RectF(x + S(18), y + S(68), w - S(36), S(22)), l2, S(13), H_SUB);
+    HLabel(c, RectF(x + S(18), y + S(92), w - S(36), S(22)), l3, S(13), H_SUB);
+    HLabel(c, RectF(x + S(18), y + S(116), w - S(36), S(22)), l4, S(13), H_SUB);
+    y += S(166);
+    Flow f = { x, x, y, x + w };
+    FBtn(c, f, L"−1 за сегодня", A_CMD, M_ST_MINUS);
+    FBtn(c, f, L"+1 за сегодня", A_CMD, M_ST_PLUS);
+    FBtn(c, f, L"Ещё (файл, сброс)…", A_MENU, HM_STATS);
+    return f.y + S(36);
+}
+static float HubQuits(const HubCtx &c, float x, float y, float w) {
+    HTitle(c, x, y, w, L"Отказы от вредного", L"Сколько вы уже держитесь");
+    HButton(c, x + w - S(140), y + S(4), L"+ Добавить", A_MENU, HM_QADD, true, 0, S(140), Color(255, 0xA7, 0x8B, 0xFA), Color(255, 0x7C, 0x3A, 0xED));
+    y += S(76);
+    std::vector<QuitItem> q = QuitList();
+    if (q.empty()) { HCard(c, RectF(x, y, w, S(80))); HLabel(c, RectF(x + S(18), y, w - S(36), S(80)), L"Пока пусто. Нажмите «+ Добавить» — например, «Сладкое».", S(14), H_SUB); return y + S(80); }
+    for (size_t i = 0; i < q.size(); i++) {
+        float ch = S(96); HCard(c, RectF(x, y, w, ch));
+        HLabel(c, RectF(x + S(18), y + S(12), w - S(36), S(22)), q[i].name, S(15), H_TEXT, true);
+        HLabel(c, RectF(x + S(18), y + S(36), w * 0.62f, S(30)), Elapsed(q[i].start), S(20), Color(255, 0xC4, 0xB5, 0xFD), true);
+        wstring sub = L"с " + DateStr(q[i].start);
+        if (q[i].best > time(NULL) - q[i].start) sub += L"   ·   рекорд: " + Span(q[i].best);
+        HLabel(c, RectF(x + S(18), y + S(66), w * 0.62f, S(20)), sub, S(12), H_DIM);
+        float bw = S(96), bh = S(30), bx = x + w - S(18) - bw, by = y + S(14);
+        HButton(c, bx, by, L"Сорвался", A_ROW, M_Q_RELAPSE0 + (int)i, false, bh, bw);
+        HButton(c, bx, by + bh + S(6), L"Удалить", A_ROW, M_Q_DEL0 + (int)i, false, bh, bw);
+        HButton(c, bx - S(8) - S(74), by, L"+1 день", A_ROW, M_Q_PLUS0 + (int)i, false, bh, S(74));
+        HButton(c, bx - S(8) - S(74), by + bh + S(6), L"−1 день", A_ROW, M_Q_MINUS0 + (int)i, false, bh, S(74));
+        y += ch + S(12);
+    }
+    return y;
+}
+static float HubRems(const HubCtx &c, float x, float y, float w) {
+    HTitle(c, x, y, w, L"Мои напоминания", L"Напомню в нужное время звуком и окном");
+    y += S(76);
+    Flow f = { x, x, y, x + w };
+    FBtn(c, f, L"Дата и время…", A_CMD, M_R_PICK, true, Color(255, 0xF4, 0x72, 0xB6), Color(255, 0xDB, 0x27, 0x77));
+    FBtn(c, f, L"Через 1 час", A_CMD, M_R_1H);
+    FBtn(c, f, L"Через 1 день", A_CMD, M_R_1D);
+    FBtn(c, f, L"Через 1 месяц", A_CMD, M_R_1M);
+    y = f.y + S(36) + S(20);
+    std::vector<Reminder> r = RemList(); if (r.size() > 40) r.resize(40);
+    if (r.empty()) { HCard(c, RectF(x, y, w, S(80))); HLabel(c, RectF(x + S(18), y, w - S(36), S(80)), L"Запланированных напоминаний нет.", S(14), H_SUB); return y + S(80); }
+    for (size_t i = 0; i < r.size(); i++) {
+        float ch = S(70); HCard(c, RectF(x, y, w, ch));
+        HLabel(c, RectF(x + S(18), y + S(10), w - S(150), S(22)), WhenStr(r[i].at), S(13), Color(255, 0xF9, 0xA8, 0xD4), true);
+        HLabel(c, RectF(x + S(18), y + S(34), w - S(150), S(26)), r[i].text, S(15), H_TEXT);
+        HButton(c, x + w - S(18) - S(100), y + (ch - S(32)) / 2, L"Удалить", A_ROW, M_R_DEL0 + (int)i, false, S(32), S(100));
+        y += ch + S(10);
+    }
+    return y;
+}
+static float HubGames(const HubCtx &c, float x, float y, float w) {
+    HTitle(c, x, y, w, L"Время в играх", L"Игры, кроме Steam, — сами или добавленные вручную");
+    y += S(76);
+    GameAgg a = GameStats(); long long wk = 0, mo = 0; for (int i = 0; i < 30; i++) { mo += a.day[i]; if (i < 7) wk += a.day[i]; }
+    float gap = S(14), cw = (w - 3 * gap) / 4, ch = S(100);
+    Color gc(255, 0x7D, 0xD3, 0xFC);
+    HStat(c, RectF(x, y, cw, ch), L"Сегодня", HM(a.day[0]), gamesNow.empty() ? L"" : L"сейчас: " + gamesNow[0], gc);
+    HStat(c, RectF(x + (cw + gap), y, cw, ch), L"7 дней", HM(wk), L"", H_TEXT);
+    HStat(c, RectF(x + 2 * (cw + gap), y, cw, ch), L"30 дней", HM(mo), L"", H_TEXT);
+    HStat(c, RectF(x + 3 * (cw + gap), y, cw, ch), L"Всего", HM(a.all), L"", H_TEXT);
+    y += ch + S(16);
+    HCard(c, RectF(x, y, w, S(200)));
+    HLabel(c, RectF(x + S(18), y + S(14), w, S(22)), L"По дням", S(14), H_TEXT, true);
+    int v7[7]; for (int i = 0; i < 7; i++) v7[i] = (int)(a.day[6 - i] / 60);
+    HBars(c, RectF(x + S(18), y + S(44), w - S(36), S(140)), v7, 7, true, Color(255, 0x38, 0xBD, 0xF8), Color(255, 0x25, 0x63, 0xEB));
+    y += S(216);
+    Flow f = { x, x, y, x + w };
+    FBtn(c, f, L"Добавить игру (.exe)…", A_CMD, M_G_ADD);
+    FBtn(c, f, L"Сбросить время…", A_CMD, M_GAMES_RESET);
+    y = f.y + S(36) + S(16);
+    if (!gamesLoaded) LoadGameLists();
+    std::set<wstring> names; for (auto &kv : knownGames) names.insert(kv.second);
+    std::vector<wstring> list(names.begin(), names.end()); if (list.size() > 40) list.resize(40);
+    for (size_t i = 0; i < list.size(); i++) {
+        const wstring &g = list[i]; float rh = S(70); HCard(c, RectF(x, y, w, rh));
+        HLabel(c, RectF(x + S(18), y + S(10), w - S(260), S(24)), g, S(15), H_TEXT, true);
+        wstring l2 = L"сегодня " + HM(a.today[g]) + L"   ·   7 дней " + HM(a.week[g]) + L"   ·   всего " + HM(a.total[g]);
+        HLabel(c, RectF(x + S(18), y + S(36), w - S(260), S(22)), l2, S(12), H_SUB);
+        HButton(c, x + w - S(18) - S(104), y + (rh - S(32)) / 2, L"Не игра", A_ROW, M_G_DEL0 + (int)i, false, S(32), S(104));
+        HButton(c, x + w - S(18) - S(104) - S(10) - S(130), y + (rh - S(32)) / 2, L"Переименовать", A_ROW, M_G_REN0 + (int)i, false, S(32), S(130));
+        y += rh + S(10);
+    }
+    if (list.empty()) { HLabel(c, RectF(x, y, w, S(40)), L"Игр пока нет: игра добавится сама, если открыть её на весь экран на минуту.", S(13), H_SUB); y += S(40); }
+    return y;
+}
+static float HubSettings(const HubCtx &c, float x, float y, float w) {
+    HTitle(c, x, y, w, L"Настройки", L"Версия " APP_VERSION L"  ·  создана " APP_CREATED);
+    y += S(76);
+    auto Row = [&](const wstring &label, const wstring &hint) {
+        HCard(c, RectF(x, y, w, S(62)));
+        HLabel(c, RectF(x + S(18), y + (hint.empty() ? S(20) : S(10)), w * 0.6f, S(22)), label, S(14), H_TEXT, true);
+        if (!hint.empty()) HLabel(c, RectF(x + S(18), y + S(32), w * 0.6f, S(20)), hint, S(12), H_DIM);
+    };
+    auto Toggle = [&](const wstring &label, const wstring &hint, bool on, int cmd) {
+        Row(label, hint); HToggle(c, RectF(x + w - S(18) - S(48), y + S(19), S(48), S(26)), on, cmd); y += S(62) + S(8);
+    };
+    auto Drop = [&](const wstring &label, const wstring &hint, const wstring &value, int menu) {
+        Row(label, hint); HDropdown(c, RectF(x + w - S(18) - S(220), y + S(13), S(220), S(36)), value, menu); y += S(62) + S(8);
+    };
+    auto Btn = [&](const wstring &label, const wstring &hint, const wstring &btn, int cmd, int act = A_CMD) {
+        Row(label, hint); float bw = MeasureW(btn, semiFont.c_str(), S(13)) + S(30);
+        HButton(c, x + w - S(18) - bw, y + S(13), btn, act, cmd, false, S(36), bw); y += S(62) + S(8);
+    };
+    HSection(c, x, y, w, L"Напоминания"); y += S(30);
+    Toggle(L"Запускать вместе с Windows", L"", AutoStartOn(), M_AUTO);
+    Toggle(L"Озвучивать напоминание голосом", L"", VoiceOn(), M_VOICE);
+    Drop(L"Голос", L"", VOICE_NAMES[std::min(6, (int)GetCfg(L"VoiceIdx", 0))], HM_VOICE);
+    Drop(L"Громкость голоса", L"", std::to_wstring(GetCfg(L"Volume", 50)) + L"%", HM_VOL);
+    { int pm = (int)GetCfg(L"Position", POS_BR); Drop(L"Где показывать окно", L"Окно можно и просто перетащить мышкой", pm >= 0 && pm < 5 ? POS_NAMES[pm] : L"Своё место", HM_POS); }
+    Toggle(L"Засчитывать, когда отошёл от компьютера", L"5 минут без мыши и клавиатуры", CountAway(), M_AWAY);
+    {
+        bool dotaOn = !RegStr(HKEY_CURRENT_USER, CFG_KEY, L"DotaCfgFile").empty();
+        wstring st = GsiActive() ? (gsiInMatch ? L"идёт матч" : L"в меню") : dotaOn ? L"подключена" : L"не подключена";
+        Drop(L"Dota 2: напоминать между матчами", L"Сейчас: " + st, dotaOn ? L"Подключена" : L"Подключить…", HM_DOTA);
+    }
+    y += S(10); HSection(c, x, y, w, L"Ночной режим (тёплый экран)"); y += S(30);
+    Toggle(L"По расписанию", L"", GetCfg(L"NightOn", 1) != 0, M_N_SCHED);
+    Drop(L"Начало вечером", L"", HHMM((int)GetCfg(L"NightStart", 0)), HM_NSTART);
+    Drop(L"Конец утром", L"", HHMM((int)GetCfg(L"NightEnd", 7 * 60)), HM_NEND);
+    { int nk = (int)GetCfg(L"NightK", 3400); wstring nv = std::to_wstring(nk) + L" K"; for (int i = 0; i < 4; i++) if (N_KS[i] == nk) nv = N_KNAMES[i];
+      Drop(L"Насколько тёплый", L"", nv, HM_NK); }
+    Btn(L"Посмотреть, как будет", L"Экран станет тёплым на 10 секунд", L"Показать", M_N_PREVIEW);
+    if (nightLimited) Btn(L"Windows ограничивает силу", L"Нужны права администратора и перезагрузка", L"Разрешить…", M_N_UNLOCK);
+    y += S(10); HSection(c, x, y, w, L"Чёрный экран (OLED)"); y += S(30);
+    Toggle(L"Иконка на панели задач при запуске", L"", GetCfg(L"BlackOnStart", 1) != 0, M_B_START);
+    { int bi = (int)GetCfg(L"AutoBlackMin", 1); Drop(L"Включать сам", L"Если не трогать мышь и клавиатуру", bi ? L"Через " + std::to_wstring(bi) + L" мин" : wstring(L"Не включать"), HM_BLACK); }
+    y += S(10); HSection(c, x, y, w, L"Прочее"); y += S(30);
+    Drop(L"Сколько шагов в день я хожу", L"Для подсчёта пользы", Num((int)GetCfg(L"StepsPerDay", 6500)), HM_STEPS);
+    Btn(L"Перенос на другой компьютер", L"Статистика, отказы, игры, напоминания", L"Сохранить в файл…", M_EXPORT);
+    Btn(L"Загрузить из файла", L"После переустановки Windows", L"Загрузить…", M_IMPORT);
+    Btn(L"Обновления", updVersion.empty() ? wstring(L"Сейчас версия " APP_VERSION) : L"Доступна версия " + updVersion,
+        updVersion.empty() ? wstring(L"Проверить") : wstring(L"Обновить"), updVersion.empty() ? M_UPD_CHECK : M_UPD_NOW);
+    Btn(L"Журнал событий", L"Когда приходили напоминания и что нажималось", L"Открыть", M_LOG);
+    Btn(L"Выйти из программы", L"Напоминания перестанут приходить", L"Выход", M_EXIT);
+    return y;
+}
+
+static void HubPaint(HWND h, HDC dc) {
+    RECT cr; GetClientRect(h, &cr); int W = cr.right, H = cr.bottom; if (W <= 0 || H <= 0) return;
+    Bitmap bmp(W, H, PixelFormat32bppARGB);
+    Graphics g(&bmp);
+    g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    SolidBrush bg(H_BG); g.FillRectangle(&bg, 0, 0, W, H);
+    hubHits.clear();
+    // боковая панель
+    float sw = S(220);
+    SolidBrush sb(H_SIDE); g.FillRectangle(&sb, RectF(0, 0, sw, (REAL)H));
+    Icon(g, RectF(S(20), S(22), S(36), S(36)), H_G1, H_G2, G_PERSON);
+    Text(g, L"Напоминалка", semiFont.c_str(), S(17), FontStyleRegular, H_TEXT, RectF(S(66), S(22), sw - S(70), S(20)), StringAlignmentNear, StringAlignmentNear, true);
+    Text(g, L"версия " APP_VERSION, L"Segoe UI", S(12), FontStyleRegular, H_DIM, RectF(S(66), S(42), sw - S(70), S(18)), StringAlignmentNear, StringAlignmentNear, true);
+    HubCtx side = { &g, RectF(0, 0, sw, (REAL)H), 0 };
+    for (int i = 0; i < 6; i++) {
+        RectF r(S(12), S(88) + i * S(46), sw - S(24), S(40)); bool act = hubTab == i, hv = Hov(A_NAV, i);
+        if (act || hv) { GraphicsPath p; RR(p, r, S(10)); SolidBrush b(act ? Color(30, 0x3D, 0xDC, 0x97) : Color(14, 255, 255, 255)); g.FillPath(&b, &p); }
+        if (act) { SolidBrush ab(H_G1); g.FillRectangle(&ab, RectF(r.X, r.Y + S(10), S(3), r.Height - S(20))); }
+        HubIcon(g, RectF(r.X + S(14), r.Y + S(9), S(22), S(22)), HUB_GLYPH[i], act ? H_G1 : H_SUB);
+        Text(g, HUB_TABS[i], act ? semiFont.c_str() : L"Segoe UI", S(14), FontStyleRegular, act ? H_TEXT : H_SUB,
+             RectF(r.X + S(46), r.Y, r.Width - S(50), r.Height), StringAlignmentNear, StringAlignmentCenter, true);
+        AddHit(side, r, A_NAV, i);
+    }
+    // содержимое
+    RectF view(sw, 0, W - sw, (REAL)H);
+    Region old; g.GetClip(&old); g.SetClip(view);
+    float pad = S(32), cx = sw + pad, cwid = W - sw - 2 * pad;
+    if (hubScroll[hubTab] < 0) hubScroll[hubTab] = 0;
+    HubCtx c = { &g, view, hubScroll[hubTab] };
+    float endY = 0, y0 = S(28);
+    switch (hubTab) {
+    case 0: endY = HubHome(c, cx, y0, cwid); break;
+    case 1: endY = HubStats(c, cx, y0, cwid); break;
+    case 2: endY = HubQuits(c, cx, y0, cwid); break;
+    case 3: endY = HubRems(c, cx, y0, cwid); break;
+    case 4: endY = HubGames(c, cx, y0, cwid); break;
+    default: endY = HubSettings(c, cx, y0, cwid); break;
+    }
+    hubContentH = endY + S(32); hubViewH = (float)H;
+    float maxScroll = std::max(0.0f, hubContentH - hubViewH);
+    if (hubScroll[hubTab] > maxScroll) { hubScroll[hubTab] = maxScroll; InvalidateRect(h, NULL, FALSE); }
+    if (maxScroll > 0) {                              // полоса прокрутки
+        float th = std::max(S(40), hubViewH * hubViewH / hubContentH), ty = (hubViewH - th) * (hubScroll[hubTab] / maxScroll);
+        GraphicsPath sp; RR(sp, RectF(W - S(8), ty + S(4), S(4), th - S(8)), S(2)); SolidBrush tb(Color(50, 255, 255, 255)); g.FillPath(&tb, &sp);
+    }
+    g.SetClip(&old);
+    Graphics screen(dc); screen.DrawImage(&bmp, 0, 0, W, H);
+}
+static void HubRefresh() { if (hHub) InvalidateRect(hHub, NULL, FALSE); }
+static const Hit *HubHitAt(int x, int y) {
+    PointF pt((REAL)x, (REAL)y);
+    for (auto it = hubHits.rbegin(); it != hubHits.rend(); ++it) if (it->r.Contains(pt)) return &*it;
+    return nullptr;
+}
+static void HubDo(const Hit &hit) {
+    int act = hit.act, arg = hit.arg; RectF r = hit.r;
+    if (act == A_NAV) { hubTab = arg; HubRefresh(); return; }
+    if (act == A_CMD) { HandleCmd(hMain, arg); HubRefresh(); return; }
+    if (act == A_ROW) { HMENU m = BuildFullMenu(); DestroyMenu(m); HandleCmd(hMain, arg); HubRefresh(); return; }   // свежие списки строк
+    if (act == A_MENU) {
+        HMENU root = BuildFullMenu();
+        HMENU sub = FindSub(FindSub(root, HUB_MENU_PATH[arg][0]), HUB_MENU_PATH[arg][1]);
+        if (sub) {
+            POINT pt = { (LONG)r.X, (LONG)(r.Y + r.Height + S(4)) }; ClientToScreen(hHub, &pt);
+            SetForegroundWindow(hHub);
+            int c = TrackPopupMenu(sub, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, hHub, NULL);
+            DestroyMenu(root);
+            if (c) HandleCmd(hMain, c);
+        } else DestroyMenu(root);
+        HubRefresh();
+    }
+}
+static LRESULT CALLBACK HubProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: { PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); HubPaint(h, dc); EndPaint(h, &ps); return 0; }
+    case WM_SIZE: HubRefresh(); return 0;
+    case WM_GETMINMAXINFO: {
+        RECT r = { 0, 0, (LONG)S(900), (LONG)S(560) }; AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        MINMAXINFO *mm = (MINMAXINFO *)lp; mm->ptMinTrackSize.x = r.right - r.left; mm->ptMinTrackSize.y = r.bottom - r.top; return 0; }
+    case WM_TIMER: HubRefresh(); return 0;                               // часы, таймер, «через N мин»
+    case WM_MOUSEMOVE: {
+        const Hit *ht = HubHitAt((short)LOWORD(lp), (short)HIWORD(lp));
+        int a = ht ? ht->act : 0, g2 = ht ? ht->arg : 0;
+        if (a != hubHoverAct || g2 != hubHoverArg) { hubHoverAct = a; hubHoverArg = g2; HubRefresh(); }
+        TRACKMOUSEEVENT te = { sizeof te, TME_LEAVE, h, 0 }; TrackMouseEvent(&te);
+        return 0; }
+    case WM_MOUSELEAVE: if (hubHoverAct) { hubHoverAct = hubHoverArg = 0; HubRefresh(); } return 0;
+    case WM_SETCURSOR: if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(NULL, hubHoverAct ? IDC_HAND : IDC_ARROW)); return TRUE; } break;
+    case WM_LBUTTONDOWN: { const Hit *ht = HubHitAt((short)LOWORD(lp), (short)HIWORD(lp)); hubPressAct = ht ? ht->act : 0; hubPressArg = ht ? ht->arg : 0; return 0; }
+    case WM_LBUTTONUP: {
+        const Hit *ht = HubHitAt((short)LOWORD(lp), (short)HIWORD(lp));
+        if (ht && ht->act == hubPressAct && ht->arg == hubPressArg) { Hit copy = *ht; hubPressAct = 0; HubDo(copy); }
+        hubPressAct = 0; return 0; }
+    case WM_MOUSEWHEEL: {
+        hubScroll[hubTab] -= GET_WHEEL_DELTA_WPARAM(wp) / 120.0f * S(70);
+        float mx = std::max(0.0f, hubContentH - hubViewH);
+        hubScroll[hubTab] = std::max(0.0f, std::min(mx, hubScroll[hubTab])); HubRefresh(); return 0; }
+    case WM_KEYDOWN: if (wp == VK_ESCAPE) { DestroyWindow(h); return 0; } break;
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_DESTROY: if (hHub == h) hHub = NULL; return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static void HubShow() {
+    if (hHub) { if (IsIconic(hHub)) ShowWindow(hHub, SW_RESTORE); SetForegroundWindow(hHub); HubRefresh(); return; }
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSW wc = {}; wc.hInstance = hInst; wc.lpfnWndProc = HubProc; wc.lpszClassName = L"StandHub";
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+        wc.hbrBackground = CreateSolidBrush(RGB(0x12, 0x15, 0x1C)); RegisterClassW(&wc); reg = true;
+    }
+    RECT r = { 0, 0, (LONG)S(1000), (LONG)S(680) };
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX;
+    AdjustWindowRect(&r, style, FALSE);
+    RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int w = r.right - r.left, hh = std::min((int)(r.bottom - r.top), (int)(wa.bottom - wa.top - 20));
+    hHub = CreateWindowExW(0, L"StandHub", L"Напоминалка", style, (wa.left + wa.right - w) / 2, (wa.top + wa.bottom - hh) / 2, w, hh, NULL, NULL, hInst, NULL);
+    if (!hHub) return;
+    BOOL dark = TRUE;                                               // тёмный заголовок окна
+    DwmSetWindowAttribute(hHub, 20, &dark, sizeof dark); DwmSetWindowAttribute(hHub, 19, &dark, sizeof dark);
+    COLORREF cap = RGB(0x0D, 0x10, 0x16); DwmSetWindowAttribute(hHub, 35, &cap, sizeof cap);
+    ShowWindow(hHub, SW_SHOW); SetForegroundWindow(hHub);
+    SetTimer(hHub, 1, 1000, NULL);
+}
+
+static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (msgTaskbarCreated && m == msgTaskbarCreated) { AddTray(); return 0; }
+    switch (m) {
+    case WM_SHOWBLACK: BlackCreate(true); return 0;
+    case WM_ALREADY:                                 // кто-то запустил программу ещё раз
+        if (!ShouldDefer()) {                        // в игре — молчим
+            nid.uFlags = NIF_INFO; wcscpy(nid.szInfoTitle, L"Напоминалка уже работает");
+            wcscpy(nid.szInfo, L"Её значок — возле часов. Вторая копия не нужна.");
+            nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        return 0;
+    case WM_UPDCHECKED: {
+        updBusy = false; wstring *r = (wstring *)lp;
+        if (!r) { if (updManual) MessageBoxW(h, L"Не удалось проверить обновления (нет интернета?). Попробуйте позже.", L"Напоминалка", MB_ICONWARNING | MB_TOPMOST); return 0; }
+        size_t nl = r->find(L'\n'); wstring tag = r->substr(0, nl), url = r->substr(nl + 1); delete r;
+        if (VerNum(tag) <= VerNum(APP_VERSION)) {
+            updVersion.clear(); updUrl.clear();
+            if (updManual) MessageBoxW(h, L"У вас последняя версия: " APP_VERSION L".", L"Напоминалка", MB_ICONINFORMATION | MB_TOPMOST);
+            return 0;
+        }
+        updVersion = tag[0] == L'v' ? tag.substr(1) : tag; updUrl = url;
+        Log(L"Найдена новая версия " + updVersion);
+        if (updManual) {
+            wstring q = L"Доступна версия " + updVersion + L" (у вас " APP_VERSION L").\n\nОбновить сейчас? Программа перезапустится, статистика и настройки сохранятся.";
+            if (MessageBoxW(h, q.c_str(), L"Напоминалка", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) UpdStartDownload();
+        } else updPopupPending = true;               // покажем, когда не будет игры и других окон
+        return 0; }
+    case WM_UPDDOWNLOADED:
+        updBusy = false;
+        if (wp) UpdInstall();
+        else { Log(L"Обновление не скачалось"); MessageBoxW(h, L"Не получилось скачать обновление. Попробуйте позже.", L"Напоминалка", MB_ICONWARNING | MB_TOPMOST); }
+        return 0;
+    case WM_GSI:
+        if (WSAGETSELECTEVENT(lp) == FD_ACCEPT) GsiAccept(h);
+        return 0;
+    case WM_TIMER:
+        if (wp == T_GAMES) { GamePoll(); return 0; }
+        if (wp == T_UPDCHECK) { SetTimer(h, T_UPDCHECK, 6 * 3600 * 1000, NULL); if (!testMode) UpdCheck(false); return 0; }
+        if (wp == T_DELOLD) { KillTimer(h, T_DELOLD); DeleteFileW((ExePath() + L".old").c_str()); return 0; }
+        if (wp == T_NIGHT) { NightUpdate(nightAppliedK < 6500); return 0; }
+        if (wp == T_NIGHT_PREVIEW) { KillTimer(h, T_NIGHT_PREVIEW); previewUntil = 0; NightUpdate(true); return 0; }
+        CheckAway();
+        if (timerEnd) {
+            if (time(NULL) >= timerEnd) {            // звук сразу, окно — как только можно показать
+                Log(L"Сработал таймер");
+                timerEnd = 0; timerFiredMin = timerMin; timerPending = true;
+                if (VoiceOn()) Speak(2); else Chime();
+            }
+            UpdateTip();
+        }
+        RemCheck();
+        if (updPopupPending && !ShouldDefer() && !away && (!cur || cur->kind == P_STATS || cur->kind == P_POSDEMO)) { updPopupPending = false; ShowPopup(P_UPDATE); }
+        BlackAutoCheck();
+        if (!remQueue.empty() && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
+            wstring id = remQueue.front(); remQueue.erase(remQueue.begin());
+            Reminder r;
+            if (RemGet(id, r)) {
+                if (cur && (cur->kind == P_REMIND || cur->kind == P_DONE)) pendingKind = cur->kind;
+                showCustomId = id; ShowPopup(P_CUSTOM);
+            }
+        }
+        if (timerPending && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_CUSTOM || cur->dragging))) {
+            timerPending = false;
+            if (cur && (cur->kind == P_REMIND || cur->kind == P_DONE)) pendingKind = cur->kind;   // вернём напоминание после таймера
+            ShowPopup(P_TIMER);
+        }
+        if (dueAction != ACT_NONE && time(NULL) >= dueAt) {
+            int a = dueAction; dueAction = ACT_NONE;
+            if (a == ACT_REMIND) { if (!away) pendingKind = P_REMIND; Log(away ? L"Время напоминания, но вас нет за компьютером — пауза" : L"Время напоминания «Пора встать»"); }
+            else { sittingSince = time(NULL); pendingKind = P_DONE; Schedule(WORK_MIN, ACT_REMIND); }
+            UpdateTip();
+        }
+        // показываем, только когда нет полноэкранного приложения и в Доте не идёт матч
+        static bool deferLogged = false;
+        if (pendingKind < 0) deferLogged = false;
+        else if (!deferLogged && ShouldDefer()) {
+            deferLogged = true;
+            Log(GsiActive() && gsiInMatch ? wstring(L"Отложено: идёт матч Dota 2") : L"Отложено: открыто на весь экран — " + ForegroundExe());
+        }
+        if (pendingKind >= 0 && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
+            int k = pendingKind; pendingKind = -1;
+            ShowPopup((Kind)k); UpdateTip();
+            Log(k == P_REMIND ? L"Показано окно «Пора встать»" : L"Показано окно «Можно садиться»");
+        }
+        return 0;
+    case WM_TRAY:
+        if (lp == WM_LBUTTONUP) { HubShow(); return 0; }
+        if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU) {
+            POINT pt; GetCursorPos(&pt);
+            HMENU mn = CreatePopupMenu();
+            AppendMenuW(mn, MF_STRING, M_HUB, L"Открыть Напоминалку");
+            SetMenuDefaultItem(mn, M_HUB, FALSE);
+            AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
+            wstring next = AwayNow() ? wstring(L"Пауза — вас нет за компьютером") : pendingKind >= 0 ? wstring(L"Напомню после матча / игры") : dueAction == ACT_NONE ? wstring(L"Напоминалка") : L"Следующее в " + Clock(dueAt);
+            AppendMenuW(mn, MF_STRING | MF_GRAYED, 0, next.c_str());
+            wstring already = L"Я уже постоял " + Min(STAND_MIN);
+            AppendMenuW(mn, MF_STRING, M_ALREADY, already.c_str());
+            if (timerEnd) { wstring tl = L"Остановить таймер (" + TimerLeft() + L")"; AppendMenuW(mn, MF_STRING, M_TIMER_STOP, tl.c_str()); }
+            else { wstring tq = L"Таймер на " + Min((int)GetCfg(L"TimerMin", 4)); AppendMenuW(mn, MF_STRING, M_TIMER_LAST, tq.c_str()); }
+            AppendMenuW(mn, MF_STRING, M_B_SHOW, L"Чёрный экран");
+            AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
+            HMENU full = BuildFullMenu();
+            AppendMenuW(mn, MF_POPUP, (UINT_PTR)full, L"Все настройки");
+            AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(mn, MF_STRING, M_EXIT, L"Выход");
+            SetForegroundWindow(h);
+            int c = TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, NULL);
+            DestroyMenu(mn);
+            if (c == M_HUB) HubShow(); else if (c) HandleCmd(h, c);
+            HubRefresh();
         }
         return 0;
     case WM_DESTROY:
@@ -2226,14 +2743,29 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 static bool FontOk(const wchar_t *name) { FontFamily f(name); return f.IsAvailable(); }
 
+// Страховка: если программа упадёт, она перезапустится сама (не чаще раза в 2 минуты) — напоминания не пропадут
+static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *ep) {
+    static bool inCrash = false; if (inCrash) return EXCEPTION_EXECUTE_HANDLER; inCrash = true;
+    wchar_t code[32]; swprintf(code, 32, L"%08lX", ep && ep->ExceptionRecord ? (unsigned long)ep->ExceptionRecord->ExceptionCode : 0UL);
+    Log(L"Сбой программы (код " + wstring(code) + L")");
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    DWORD last = GetCfg(L"LastCrash", 0), now = (DWORD)time(NULL); SetCfg(L"LastCrash", now);
+    if (!testMode && now - last > 120) {
+        wstring cmd = L"\"" + ExePath() + L"\" --restart";
+        STARTUPINFOW si = { sizeof si }; PROCESS_INFORMATION pi;
+        if (CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); Log(L"Перезапуск после сбоя"); }
+    } else Log(L"Два сбоя подряд — без перезапуска");
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
+    SetUnhandledExceptionFilter(CrashFilter);
     hInst = hi;
 #ifdef TEST_MODE
     mtx = CreateMutexW(NULL, TRUE, L"StandReminder_SingleInstance_Test");   // тестовая не мешает основной запуститься
 #else
     mtx = CreateMutexW(NULL, TRUE, L"StandReminder_SingleInstance");
 #endif
-    if (GetLastError() == ERROR_ALREADY_EXISTS && cmd && wcsstr(cmd, L"--updated")) {   // старая копия ещё закрывается
+    if (GetLastError() == ERROR_ALREADY_EXISTS && cmd && (wcsstr(cmd, L"--updated") || wcsstr(cmd, L"--restart"))) {   // старая копия ещё закрывается
         for (int i = 0; i < 50 && mtx; i++) { DWORD w = WaitForSingleObject(mtx, 200); if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) break; }
         SetLastError(0);
     }
