@@ -89,7 +89,7 @@ static Popup *cur = nullptr;
 static time_t dueAt; static int dueAction = ACT_NONE;
 static time_t timerEnd = 0; static int timerMin = 4, timerFiredMin = 4; static bool timerPending = false;   // таймер
 static int pendingKind = -1;            // напоминание ждёт, пока закроют полноэкранное приложение
-#define APP_VERSION L"3.1"
+#define APP_VERSION L"3.2"
 #define UPDATE_REPO L"yusupedilov95-cyber/napominalka"
 #define APP_CREATED L"13 ноября 2026 г."
 static float sc = 1.0f;
@@ -229,21 +229,26 @@ static bool DisplayRequired() {          // видео в браузере/пл�
     return (st & ES_DISPLAY_REQUIRED) != 0;
 }
 static bool IsFullscreenApp() {
-    if (hBlack && GetForegroundWindow() == hBlack) return false;   // наш чёрный экран — не игра
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == GetShellWindow()) return false;
+    if (hBlack && fg == hBlack) return false;                     // наш чёрный экран — не игра
+    wchar_t cls[64]; GetClassNameW(fg, cls, 64);
+    if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    if (IsIconic(fg) || !IsWindowVisible(fg)) return false;
+    // Окно на переднем плане должно закрывать весь свой монитор. Раньше хватало одного признака Windows
+    // «занят полноэкранным приложением» — он иногда «залипает» после игры, и напоминания откладывались часами.
+    RECT wr; GetWindowRect(fg, &wr);
+    MONITORINFO mi = { sizeof mi }; GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi);
+    bool covers = wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top &&
+                  wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+    if (!covers) return false;
     QUERY_USER_NOTIFICATION_STATE st;
     if (SUCCEEDED(SHQueryUserNotificationState(&st)) &&
         (st == QUNS_RUNNING_D3D_FULL_SCREEN || st == QUNS_BUSY || st == QUNS_PRESENTATION_MODE)) return true;
-    HWND fg = GetForegroundWindow();
-    if (!fg || fg == GetShellWindow()) return false;
-    wchar_t cls[64]; GetClassNameW(fg, cls, 64);
-    if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman")) return false;
     LONG st2 = GetWindowLongW(fg, GWL_STYLE);
-    if ((st2 & WS_CAPTION) == WS_CAPTION) return false;   // обычное окно с заголовком (в т.ч. развёрнутое) — не полноэкранное
-    if (IsZoomed(fg) || IsIconic(fg) || !IsWindowVisible(fg)) return false;   // просто развёрнутое окно (Chrome, Discord…) — не игра
-    RECT wr; GetWindowRect(fg, &wr);
-    MONITORINFO mi = { sizeof mi }; GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi);
-    return wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top &&
-           wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+    if ((st2 & WS_CAPTION) == WS_CAPTION) return false;           // обычное окно с заголовком — не полноэкранное
+    if (IsZoomed(fg)) return false;                               // просто развёрнутое окно (Chrome, Discord…)
+    return true;
 }
 
 // ---------- Dota 2: игра сама сообщает, идёт ли матч (Game State Integration) ----------
@@ -1302,7 +1307,8 @@ static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             bool idleNow = false;
             if (p->kind == P_REMIND) { LASTINPUTINFO li = { sizeof li }; idleNow = GetLastInputInfo(&li) && GetTickCount() - li.dwTime > 15000; }
             // пока мышь над окном или за компьютером никого (не трогали мышь/клавиатуру) — «игнор» не считаем
-            if (p->hover != HIT_NONE || p->dragging || idleNow) p->shownAt += 100;
+            bool hiddenByFs = (p->kind == P_REMIND) && IsFullscreenApp();   // поверх игры окно может быть не видно
+            if (p->hover != HIT_NONE || p->dragging || idleNow || hiddenByFs) p->shownAt += 100;
             if (GetTickCount() - p->shownAt >= p->autoMs) {
                 KillTimer(h, T_TICK);
                 if (cur == p) {
@@ -2676,7 +2682,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RemCheck();
         if (updPopupPending && !ShouldDefer() && !away && (!cur || cur->kind == P_STATS || cur->kind == P_POSDEMO)) { updPopupPending = false; ShowPopup(P_UPDATE); }
         BlackAutoCheck();
-        if (!remQueue.empty() && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
+        if (!remQueue.empty() && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->kind == P_REMIND || cur->kind == P_DONE || cur->dragging))) {
             wstring id = remQueue.front(); remQueue.erase(remQueue.begin());
             Reminder r;
             if (RemGet(id, r)) {
@@ -2702,10 +2708,18 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             deferLogged = true;
             Log(GsiActive() && gsiInMatch ? wstring(L"Отложено: идёт матч Dota 2") : L"Отложено: открыто на весь экран — " + ForegroundExe());
         }
-        if (pendingKind >= 0 && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || cur->kind == P_CUSTOM || cur->dragging))) {
+        // своё напоминание, которое висит дольше 2 минут, уступает место «Пора встать»
+        if (pendingKind >= 0 && !ShouldDefer() && !(cur && (cur->kind == P_QUIT || cur->kind == P_TIMER || (cur->kind == P_CUSTOM && GetTickCount() - cur->shownAt <= 120000) || cur->dragging))) {
             int k = pendingKind; pendingKind = -1;
             ShowPopup((Kind)k); UpdateTip();
             Log(k == P_REMIND ? L"Показано окно «Пора встать»" : L"Показано окно «Можно садиться»");
+        }
+        // Страховка: если по какой-то причине напоминание нигде не запланировано — запланировать снова
+        {
+            static int lostFor = 0;
+            bool lost = !away && dueAction == ACT_NONE && pendingKind < 0 && !(cur && (cur->kind == P_REMIND || cur->kind == P_QUIT));
+            lostFor = lost ? lostFor + 1 : 0;
+            if (lostFor >= 10) { lostFor = 0; Log(L"Напоминание оказалось не запланировано — исправлено, через " + std::to_wstring(SNOOZE_MIN) + L" мин"); Schedule(SNOOZE_MIN, ACT_REMIND); }
         }
         return 0;
     case WM_TRAY:
