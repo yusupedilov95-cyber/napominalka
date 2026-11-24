@@ -47,7 +47,8 @@ enum { M_NOW = 200, M_AUTO, M_VOICE, M_EXIT, M_TEST, M_STATS, M_ST_MINUS, M_ST_P
        M_Q_SHOW = 800, M_Q_CUSTOM, M_Q_PRESET0 = 810, M_Q_RELAPSE0 = 900, M_Q_PLUS0 = 930, M_Q_MINUS0 = 960, M_Q_DEL0 = 990, M_GAMES = 1100, M_GAMES_RESET, M_G_ADD, M_G_REN0 = 1200, M_G_DEL0 = 1250,
        M_N_SCHED = 1300, M_N_ON, M_N_OFF, M_N_AUTO, M_N_PREVIEW, M_N_UNLOCK, M_N_START0 = 1320, M_N_END0 = 1340, M_N_K0 = 1360,
        M_R_1H = 1400, M_R_1D, M_R_1M, M_R_PICK, M_R_DEL0 = 1420,
-       M_B_SHOW = 1500, M_B_START, M_B_IDLE0 = 1510, M_LOG = 1600, M_UPD_CHECK, M_UPD_NOW, M_HUB };
+       M_B_SHOW = 1500, M_B_START, M_B_IDLE0 = 1510, M_LOG = 1600, M_UPD_CHECK, M_UPD_NOW, M_HUB,
+       M_REP_TOGGLE = 1700, M_R_REP1, M_R_REP2, M_R_REP7, M_R_SHIFT0 = 1720 };
 static const int B_IDLE[] = { 0, 1, 2, 3, 5, 10, 15 };
 static const int N_STARTS[] = { 20 * 60, 21 * 60, 21 * 60 + 30, 22 * 60, 22 * 60 + 30, 23 * 60, 23 * 60 + 30, 0 };
 static const int N_ENDS[] = { 5 * 60, 6 * 60, 6 * 60 + 30, 7 * 60, 7 * 60 + 30, 8 * 60, 9 * 60 };
@@ -89,7 +90,7 @@ static Popup *cur = nullptr;
 static time_t dueAt; static int dueAction = ACT_NONE;
 static time_t timerEnd = 0; static int timerMin = 4, timerFiredMin = 4; static bool timerPending = false;   // таймер
 static int pendingKind = -1;            // напоминание ждёт, пока закроют полноэкранное приложение
-#define APP_VERSION L"3.2"
+#define APP_VERSION L"3.3"
 #define UPDATE_REPO L"yusupedilov95-cyber/napominalka"
 #define APP_CREATED L"13 ноября 2026 г."
 static float sc = 1.0f;
@@ -948,8 +949,12 @@ static void DismissAnimated() {
 
 static wstring HHMM(int m) { wchar_t b[8]; swprintf(b, 8, L"%02d:%02d", m / 60 % 24, m % 60); return b; }
 // ---------- свои напоминания на дату и время ----------
-static const wchar_t *REM_KEY = L"Software\\StandReminder\\Reminders";   // id -> «время<TAB>текст»
-struct Reminder { wstring id; time_t at; wstring text; };
+static const wchar_t *REM_KEY = L"Software\\StandReminder\\Reminders";   // id -> «время<TAB>текст» или «время<TAB>R<TAB>дни<TAB>база<TAB>текст»
+struct Reminder { wstring id; time_t at; wstring text; int every = 0; time_t base = 0; };   // every — повтор раз в N дней (0 — разовое)
+static bool RepeatOn() { return GetCfg(L"RepeatOn", 0) != 0; }      // повторяющиеся напоминания: по умолчанию выключены
+static wstring EveryStr(int d) {
+    return d == 1 ? wstring(L"каждый день") : d == 2 ? wstring(L"через день") : d == 7 ? wstring(L"раз в неделю") : L"каждые " + Days(d);
+}
 static std::vector<wstring> remQueue;          // сработали, ждут показа
 static std::set<wstring> remFired;             // уже сработали в этот запуск (в реестре до «Готово»)
 static std::vector<Reminder> menuRems;
@@ -962,20 +967,39 @@ static std::vector<Reminder> RemList() {
         if (type != REG_SZ) continue;
         data[dl / 2] = 0; wstring d = data; size_t tab = d.find(L'\t');
         if (tab == wstring::npos) continue;
-        v.push_back({ name, (time_t)_wtoi64(d.substr(0, tab).c_str()), d.substr(tab + 1) });
+        Reminder r; r.id = name; r.at = (time_t)_wtoi64(d.substr(0, tab).c_str()); r.text = d.substr(tab + 1);
+        if (r.text.compare(0, 2, L"R\t") == 0) {          // повторяющееся
+            wstring rest = r.text.substr(2); size_t t1 = rest.find(L'\t'), t2 = t1 == wstring::npos ? t1 : rest.find(L'\t', t1 + 1);
+            if (t2 == wstring::npos) continue;
+            r.every = std::max(1, _wtoi(rest.substr(0, t1).c_str())); r.base = (time_t)_wtoi64(rest.substr(t1 + 1, t2 - t1 - 1).c_str());
+            r.text = rest.substr(t2 + 1); if (!r.base) r.base = r.at;
+        }
+        v.push_back(r);
     }
     RegCloseKey(k);
     std::sort(v.begin(), v.end(), [](const Reminder &a, const Reminder &b) { return a.at < b.at; });
     return v;
 }
 static bool RemGet(const wstring &id, Reminder &r) { for (auto &x : RemList()) if (x.id == id) { r = x; return true; } return false; }
-static void RemSave(const wstring &id, time_t at, const wstring &text) {
-    SetRegSz(REM_KEY, id, std::to_wstring((long long)at) + L"\t" + text);
+static void RemSave(const wstring &id, time_t at, const wstring &text, int every = 0, time_t base = 0) {
+    wstring v = std::to_wstring((long long)at) + L"\t";
+    if (every > 0) v += L"R\t" + std::to_wstring(every) + L"\t" + std::to_wstring((long long)(base ? base : at)) + L"\t";
+    SetRegSz(REM_KEY, id, v + text);
 }
-static void RemAdd(time_t at, const wstring &text) {
+static std::vector<Reminder> RemVisible() {    // что показывать в списках: повторяющиеся — только если функция включена
+    std::vector<Reminder> v; for (auto &r : RemList()) if (!r.every || RepeatOn()) v.push_back(r);
+    if (v.size() > 40) v.resize(40);
+    return v;
+}
+static time_t NextOccur(time_t base, int every) {   // следующий раз после «сейчас», в то же время суток
+    time_t now = time(NULL), t = base; struct tm m = *localtime(&base);
+    for (int guard = 0; guard < 5000 && t <= now; guard++) { m.tm_mday += every; m.tm_isdst = -1; t = mktime(&m); }
+    return t;
+}
+static void RemAdd(time_t at, const wstring &text, int every = 0) {
     static unsigned n = 0;
     wstring id = L"r" + std::to_wstring((long long)time(NULL)) + L"_" + std::to_wstring(GetTickCount() % 100000) + L"_" + std::to_wstring(n++);
-    RemSave(id, at, text.empty() ? L"Напоминание" : text);
+    RemSave(id, at, text.empty() ? (every ? L"Тренировка" : L"Напоминание") : text, every, at);
 }
 static void RemDelete(const wstring &id) { DelRegV(REM_KEY, id); remFired.erase(id); }
 static time_t AddMonths(time_t t, int months) {
@@ -998,6 +1022,7 @@ static void RemCheck() {                       // раз в секунду: чт
     time_t now = time(NULL);
     for (auto &r : RemList()) {
         if (r.at > now || remFired.count(r.id)) continue;
+        if (r.every && !RepeatOn()) continue;          // повторяющиеся выключены — молчим, но не удаляем
         remFired.insert(r.id); remQueue.push_back(r.id);
         Log(L"Сработало своё напоминание: " + r.text);
         Chime();
@@ -1166,7 +1191,8 @@ static void ShowPopup(Kind kind) {
         p->title = r.text;
         long late = (long)(time(NULL) - r.at);
         p->text = late > 120 ? L"Было назначено на " + DateStr(r.at) + L" " + HHMM((int)(localtime(&r.at)->tm_hour * 60 + localtime(&r.at)->tm_min))
-                             : L"Ваше напоминание";
+                             : wstring(L"Ваше напоминание");
+        if (r.every) p->text += L"\nПовторяется " + EveryStr(r.every) + L". «Готово» — следующий раз " + WhenStr(NextOccur(r.base, r.every)) + L".";
         p->glyph = G_CLOCK; p->c1 = Color(255, 0xF4, 0x72, 0xB6); p->c2 = Color(255, 0xDB, 0x27, 0x77);
         p->nb = 3; p->btn[0] = { {}, L"Через 10 минут", false }; p->btn[1] = { {}, L"Готово", true }; p->btn[2] = { {}, L"Через 1 час", false };
         break; }
@@ -1230,9 +1256,12 @@ static void OnAction(Popup *p, int id) {
     if (kind == P_TIMER && id == HIT_B0) { DismissAnimated(); StartTimer(timerFiredMin); return; }
     if (kind == P_CUSTOM) {
         Reminder r; bool have = RemGet(p->customId, r);
-        if (id == HIT_B0 || id == HIT_B2) { if (have) { RemSave(r.id, time(NULL) + (id == HIT_B0 ? 600 : 3600), r.text); remFired.erase(r.id); } }
-        else if (id == HIT_B1) RemDelete(p->customId);
-        else RemDelete(p->customId);              // крестик — как «Готово»
+        if (id == HIT_B0 || id == HIT_B2) {        // отложить (у повторяющихся расписание не сдвигается)
+            if (have) { RemSave(r.id, time(NULL) + (id == HIT_B0 ? 600 : 3600), r.text, r.every, r.base); remFired.erase(r.id); }
+        } else if (have && r.every) {              // «Готово» или крестик у повторяющегося — ждём следующий раз
+            time_t nx = NextOccur(r.base, r.every); RemSave(r.id, nx, r.text, r.every, nx); remFired.erase(r.id);
+            Log(L"Повторяющееся «" + r.text + L"» — следующий раз " + WhenStr(nx));
+        } else RemDelete(p->customId);            // разовое: «Готово» и крестик удаляют
         DismissAnimated(); return;
     }
     if (kind == P_STATS && id == HIT_B0) { StatAdjustToday(-1); ShowPopup(P_STATS); return; }
@@ -1631,6 +1660,26 @@ static wstring U2W(const std::string &u) {
 static std::vector<QuitItem> menuQuits;
 static std::vector<wstring> menuGames;     // список, по которому построено меню
 
+static bool AskRepeat(HWND h, int every) {       // повторяющееся: текст + когда первый раз
+    wstring text; SYSTEMTIME st = {};
+    time_t now = time(NULL); struct tm m = *localtime(&now); m.tm_min = 0; m.tm_sec = 0; m.tm_hour = 18; m.tm_isdst = -1;
+    time_t def = mktime(&m); if (def <= now) { m.tm_mday += 1; m.tm_isdst = -1; def = mktime(&m); }   // по умолчанию 18:00
+    struct tm d = *localtime(&def);
+    st.wYear = (WORD)(d.tm_year + 1900); st.wMonth = (WORD)(d.tm_mon + 1); st.wDay = (WORD)d.tm_mday; st.wHour = (WORD)d.tm_hour; st.wMinute = (WORD)d.tm_min;
+    wstring prompt = L"О чём напоминать " + EveryStr(every) + L"? (например, «Тренировка»)";
+    if (!AskText(h, L"Повторяющееся напоминание", prompt.c_str(), text, &st, true, 120)) return false;
+    struct tm t = {}; t.tm_year = st.wYear - 1900; t.tm_mon = st.wMonth - 1; t.tm_mday = st.wDay; t.tm_hour = st.wHour; t.tm_min = st.wMinute; t.tm_isdst = -1;
+    time_t at = mktime(&t);
+    if (at <= now) at = NextOccur(at, every);          // первый раз в прошлом — берём ближайший будущий
+    RemAdd(at, text, every);
+    Log(L"Добавлено повторяющееся (" + EveryStr(every) + L"), первый раз " + WhenStr(at));
+    return true;
+}
+static void RemShift(const Reminder &r, int days) {     // сдвинуть расписание на N дней
+    struct tm m = *localtime(&r.base); m.tm_mday += days; m.tm_isdst = -1; time_t nb = mktime(&m);
+    time_t at = nb; if (at <= time(NULL)) at = NextOccur(nb, r.every);
+    RemSave(r.id, at, r.text, r.every, at); remFired.erase(r.id);
+}
 static bool AskReminder(HWND h, time_t at, bool pickTime) {
     wstring text; SYSTEMTIME st = {};
     if (pickTime) {
@@ -1674,7 +1723,10 @@ static void ExportStats(HWND h) {
     out += "StepsPerDay=" + std::to_string(GetCfg(L"StepsPerDay", 6500)) + "\r\n";
     for (auto &q : QuitList())
         out += "Quit:" + W2U(q.name) + "=" + std::to_string((long long)q.start) + ";" + std::to_string((long long)q.best) + "\r\n";
-    for (auto &r : RemList()) out += "Rem:" + W2U(r.id) + "=" + std::to_string((long long)r.at) + ";" + W2U(r.text) + "\r\n";
+    for (auto &r : RemList()) {
+        if (r.every) out += "RemR:" + W2U(r.id) + "=" + std::to_string((long long)r.at) + ";" + std::to_string(r.every) + ";" + std::to_string((long long)r.base) + ";" + W2U(r.text) + "\r\n";
+        else out += "Rem:" + W2U(r.id) + "=" + std::to_string((long long)r.at) + ";" + W2U(r.text) + "\r\n";
+    }
     if (!gamesLoaded) LoadGameLists();
     for (auto &kv : knownGames) out += "GameExe:" + W2U(kv.first) + "=" + W2U(kv.second) + "\r\n";
     for (auto &ig : ignoredExe) out += "GameIgnore:" + W2U(ig) + "=1\r\n";
@@ -1710,6 +1762,15 @@ static bool ImportStats(HWND h) {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
         size_t eq = line.find('='); if (eq == std::string::npos) continue;
         std::string key = line.substr(0, eq);
+        if (!key.compare(0, 5, "RemR:")) {            // повторяющееся: время;дни;база;текст
+            std::string v = line.substr(eq + 1); size_t a1 = v.find(';'), a2 = a1 == std::string::npos ? a1 : v.find(';', a1 + 1), a3 = a2 == std::string::npos ? a2 : v.find(';', a2 + 1);
+            if (a3 != std::string::npos) {
+                Reminder r; r.id = U2W(key.substr(5)); r.at = (time_t)atoll(v.c_str()); r.every = std::max(1, atoi(v.c_str() + a1 + 1));
+                r.base = (time_t)atoll(v.c_str() + a2 + 1); r.text = U2W(v.substr(a3 + 1));
+                if (r.at > 0 && !r.id.empty()) rems.push_back(r);
+            }
+            continue;
+        }
         if (!key.compare(0, 4, "Rem:")) {
             size_t sc2 = line.find(';', eq); long long at = atoll(line.c_str() + eq + 1);
             if (sc2 != std::string::npos && at > 0) rems.push_back({ U2W(key.substr(4)), (time_t)at, U2W(line.substr(sc2 + 1)) });
@@ -1749,7 +1810,7 @@ static bool ImportStats(HWND h) {
     }
     if (!rems.empty()) {                             // напоминания из файла заменяют текущие
         RegDeleteKeyW(HKEY_CURRENT_USER, REM_KEY); remFired.clear(); remQueue.clear();
-        for (auto &r : rems) if (!r.id.empty()) RemSave(r.id, r.at, r.text);
+        for (auto &r : rems) if (!r.id.empty()) RemSave(r.id, r.at, r.text, r.every, r.base);
     }
     if (!gExe.empty() || !gIgn.empty()) {
         RegDeleteKeyW(HKEY_CURRENT_USER, GK_KEY); RegDeleteKeyW(HKEY_CURRENT_USER, GI_KEY);
@@ -1946,16 +2007,24 @@ static HMENU BuildFullMenu() {
                 }
             }
             AppendMenuW(mn, MF_POPUP, (UINT_PTR)nm, L"Ночной режим (тёплый экран)");
-            HMENU rm = CreatePopupMenu(); menuRems = RemList(); if (menuRems.size() > 40) menuRems.resize(40);
+            HMENU rm = CreatePopupMenu(); menuRems = RemVisible();
             AppendMenuW(rm, MF_STRING, M_R_1H, L"Через 1 час…");
             AppendMenuW(rm, MF_STRING, M_R_1D, L"Через 1 день…");
             AppendMenuW(rm, MF_STRING, M_R_1M, L"Через 1 месяц…");
             AppendMenuW(rm, MF_STRING, M_R_PICK, L"Выбрать дату и время…");
+            AppendMenuW(rm, MF_SEPARATOR, 0, NULL);
+            if (RepeatOn()) {
+                AppendMenuW(rm, MF_STRING, M_R_REP2, L"Повторять через день…");
+                AppendMenuW(rm, MF_STRING, M_R_REP1, L"Повторять каждый день…");
+                AppendMenuW(rm, MF_STRING, M_R_REP7, L"Повторять раз в неделю…");
+                AppendMenuW(rm, MF_STRING, M_REP_TOGGLE, L"Выключить повторяющиеся");
+            } else AppendMenuW(rm, MF_STRING, M_REP_TOGGLE, L"Включить повторяющиеся напоминания");
             if (!menuRems.empty()) {
                 AppendMenuW(rm, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(rm, MF_STRING | MF_GRAYED, 0, L"Запланировано (нажмите, чтобы удалить):");
                 for (size_t i = 0; i < menuRems.size(); i++) {
                     wstring t = WhenStr(menuRems[i].at) + L"  —  " + (menuRems[i].text.size() > 40 ? menuRems[i].text.substr(0, 40) + L"…" : menuRems[i].text);
+                    if (menuRems[i].every) t += L"  (" + EveryStr(menuRems[i].every) + L")";
                     AppendMenuW(rm, MF_STRING, M_R_DEL0 + i, t.c_str());
                 }
             }
@@ -2048,6 +2117,9 @@ static void HandleCmd(HWND h, int c) {
                 bool on = !GetCfg(L"BlackOnStart", 1); SetCfg(L"BlackOnStart", on);
                 if (on) BlackCreate(false); else if (hBlack) DestroyWindow(hBlack);
             }
+            else if (c == M_REP_TOGGLE) { bool on = !RepeatOn(); SetCfg(L"RepeatOn", on); Log(on ? L"Повторяющиеся напоминания включены" : L"Повторяющиеся напоминания выключены"); }
+            else if (c == M_R_REP1 || c == M_R_REP2 || c == M_R_REP7) { if (!RepeatOn()) SetCfg(L"RepeatOn", 1); AskRepeat(h, c == M_R_REP1 ? 1 : c == M_R_REP2 ? 2 : 7); }
+            else if (c >= M_R_SHIFT0 && c < M_R_SHIFT0 + 40) { size_t i = c - M_R_SHIFT0; if (i < menuRems.size() && menuRems[i].every) RemShift(menuRems[i], 1); }
             else if (c >= M_R_1H && c < M_R_DEL0 + 40) {
                 time_t now = time(NULL);
                 if (c == M_R_1H) AskReminder(h, now + 3600, false);
@@ -2056,7 +2128,8 @@ static void HandleCmd(HWND h, int c) {
                 else if (c == M_R_PICK) AskReminder(h, 0, true);
                 else {
                     size_t i = c - M_R_DEL0; if (i >= menuRems.size()) return;
-                    wstring t = L"Удалить напоминание?\n\n" + WhenStr(menuRems[i].at) + L"  —  " + menuRems[i].text;
+                    wstring t = L"Удалить напоминание?\n\n" + WhenStr(menuRems[i].at) + L"  —  " + menuRems[i].text +
+                                (menuRems[i].every ? L"\n\nОно повторяется " + EveryStr(menuRems[i].every) + L" — будут удалены все повторы." : L"");
                     if (MessageBoxW(h, t.c_str(), L"Напоминалка", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST) == IDYES) RemDelete(menuRems[i].id);
                 }
             }
@@ -2402,14 +2475,30 @@ static float HubRems(const HubCtx &c, float x, float y, float w) {
     FBtn(c, f, L"Через 1 час", A_CMD, M_R_1H);
     FBtn(c, f, L"Через 1 день", A_CMD, M_R_1D);
     FBtn(c, f, L"Через 1 месяц", A_CMD, M_R_1M);
-    y = f.y + S(36) + S(20);
-    std::vector<Reminder> r = RemList(); if (r.size() > 40) r.resize(40);
+    y = f.y + S(36) + S(16);
+    if (RepeatOn()) {
+        Flow f2 = { x, x, y, x + w };
+        Color p1(255, 0x60, 0xA5, 0xFA), p2(255, 0x63, 0x66, 0xF1);
+        FBtn(c, f2, L"Повтор через день…", A_CMD, M_R_REP2, true, p1, p2);
+        FBtn(c, f2, L"Повтор каждый день…", A_CMD, M_R_REP1);
+        FBtn(c, f2, L"Повтор раз в неделю…", A_CMD, M_R_REP7);
+        y = f2.y + S(36) + S(20);
+    } else {
+        HCard(c, RectF(x, y, w, S(70)));
+        HLabel(c, RectF(x + S(18), y + S(12), w - S(170), S(22)), L"Повторяющиеся напоминания выключены", S(14), H_TEXT, true);
+        HLabel(c, RectF(x + S(18), y + S(36), w - S(170), S(20)), L"Например, «Тренировка» через день в 18:00", S(12), H_DIM);
+        HButton(c, x + w - S(18) - S(120), y + S(17), L"Включить", A_CMD, M_REP_TOGGLE, false, S(36), S(120));
+        y += S(70) + S(20);
+    }
+    std::vector<Reminder> r = RemVisible();
     if (r.empty()) { HCard(c, RectF(x, y, w, S(80))); HLabel(c, RectF(x + S(18), y, w - S(36), S(80)), L"Запланированных напоминаний нет.", S(14), H_SUB); return y + S(80); }
     for (size_t i = 0; i < r.size(); i++) {
         float ch = S(70); HCard(c, RectF(x, y, w, ch));
-        HLabel(c, RectF(x + S(18), y + S(10), w - S(150), S(22)), WhenStr(r[i].at), S(13), Color(255, 0xF9, 0xA8, 0xD4), true);
-        HLabel(c, RectF(x + S(18), y + S(34), w - S(150), S(26)), r[i].text, S(15), H_TEXT);
+        wstring when = WhenStr(r[i].at); if (r[i].every) when += L"   ·   повтор " + EveryStr(r[i].every);
+        HLabel(c, RectF(x + S(18), y + S(10), w - S(260), S(22)), when, S(13), r[i].every ? Color(255, 0x93, 0xC5, 0xFD) : Color(255, 0xF9, 0xA8, 0xD4), true);
+        HLabel(c, RectF(x + S(18), y + S(34), w - S(260), S(26)), r[i].text, S(15), H_TEXT);
         HButton(c, x + w - S(18) - S(100), y + (ch - S(32)) / 2, L"Удалить", A_ROW, M_R_DEL0 + (int)i, false, S(32), S(100));
+        if (r[i].every) HButton(c, x + w - S(18) - S(100) - S(10) - S(110), y + (ch - S(32)) / 2, L"Сдвинуть +1 д", A_ROW, M_R_SHIFT0 + (int)i, false, S(32), S(110));
         y += ch + S(10);
     }
     return y;
@@ -2474,6 +2563,7 @@ static float HubSettings(const HubCtx &c, float x, float y, float w) {
     Drop(L"Громкость голоса", L"", std::to_wstring(GetCfg(L"Volume", 50)) + L"%", HM_VOL);
     { int pm = (int)GetCfg(L"Position", POS_BR); Drop(L"Где показывать окно", L"Окно можно и просто перетащить мышкой", pm >= 0 && pm < 5 ? POS_NAMES[pm] : L"Своё место", HM_POS); }
     Toggle(L"Засчитывать, когда отошёл от компьютера", L"5 минут без мыши и клавиатуры", CountAway(), M_AWAY);
+    Toggle(L"Повторяющиеся напоминания", L"Например, тренировка через день — добавлять в разделе «Напоминания»", RepeatOn(), M_REP_TOGGLE);
     {
         bool dotaOn = !RegStr(HKEY_CURRENT_USER, CFG_KEY, L"DotaCfgFile").empty();
         wstring st = GsiActive() ? (gsiInMatch ? L"идёт матч" : L"в меню") : dotaOn ? L"подключена" : L"не подключена";
